@@ -1,0 +1,91 @@
+{
+    "name": "TTLLM Gateway Container",
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "dev",
+    "workspaceFolder": "/workspaces/ttllm",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "anthropic.claude-code",
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.black-formatter",
+                "ms-python.flake8",
+                "ms-python.isort",
+                "mhutchie.git-graph",
+                "GitHub.vscode-pull-request-github",
+                "bierner.markdown-mermaid",
+                "github.copilot",
+                "github.copilot-chat",
+                "ms-azuretools.vscode-docker",
+                "ckolkman.vscode-postgres"
+            ],
+            "settings": {
+                "[python]": {
+                    "editor.defaultFormatter": "ms-python.black-formatter",
+                    "editor.formatOnSave": true,
+                    "editor.codeActionsOnSave": {
+                        "source.organizeImports": "always"
+                    },
+                    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+                    "python.venvPath": "${workspaceFolder}",
+                    "python.terminal.activateEnvironment": true
+                },
+                "black-formatter.importStrategy": "fromEnvironment",
+                "black-formatter.path": [
+                    "/usr/local/bin/black"
+                ],
+                "black-formatter.args": [
+                    "--line-length",
+                    "120"
+                ],
+                "flake8.importStrategy": "fromEnvironment",
+                "flake8.path": [
+                    "/usr/local/bin/flake8"
+                ],
+                "flake8.args": [
+                    "--max-line-length",
+                    "121",
+                    "--extend-ignore",
+                    "W503,E501,D212,E203",
+                    "--docstring-convention",
+                    "google"
+                ],
+                "flake8.severity": {
+                    "E": "Error",
+                    "F": "Error",
+                    "I": "Information",
+                    "W": "Warning"
+                },
+                "isort.importStrategy": "fromEnvironment",
+                "isort.args": [
+                    "--profile",
+                    "black",
+                    "--line-length",
+                    "120"
+                ],
+                "isort.check": true,
+                "isort.path": [
+                    "/usr/local/bin/isort"
+                ]
+            }
+        }
+    },
+    "postCreateCommand": "bash -lc 'until command -v python3 >/dev/null 2>&1; do echo \"Waiting for python3...\"; sleep 2; done && sudo chown vscode:vscode .venv && python3 -m venv .venv && source .venv/bin/activate && pip install -e \".[dev]\"'",
+    "mounts": [
+        "type=volume,target=/workspaces/ttllm/.venv"
+    ],
+    "remoteUser": "vscode",
+    "containerEnv": {
+        "workspaceFolder": "${containerWorkspaceFolder}",
+        "TTLLM_DATABASE_URL": "postgresql+asyncpg://ttllm:dev@db:5432/ttllm"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/python:1": {},
+        "ghcr.io/devcontainers/features/aws-cli:1": {},
+        "ghcr.io/devcontainers/features/github-cli:1": {},
+        "ghcr.io/prulloac/devcontainer-features/pre-commit:1": {},
+        "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
+        "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+    }
+}

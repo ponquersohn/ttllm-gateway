@@ -1,0 +1,9 @@
+default:
+  settings:
+    include: shared/nonexistent.yaml
+  engine:
+    log_level: INFO
+
+dev:
+  settings:
+    enabled: true

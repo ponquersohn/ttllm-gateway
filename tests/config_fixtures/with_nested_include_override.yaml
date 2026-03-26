@@ -1,0 +1,22 @@
+default:
+  outputs:
+    splunk:
+      include: shared/splunk_output.yaml
+      checkpoint: true
+      params:
+        index: "my_index"
+        sourcetype: "test:events"
+
+dev:
+  outputs:
+    splunk:
+      params:
+        batch_size: 50
+        index: "dev_index"
+
+prod:
+  outputs:
+    splunk:
+      params:
+        batch_size: 200
+        index: "prod_index"

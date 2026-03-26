@@ -1,0 +1,13 @@
+default:
+  vars:
+    connection:
+      host: localhost
+      port: 6379
+  redis:
+    host: "ref:vars.connection.host"
+    port: "ref:vars.connection.port"
+
+dev:
+  vars:
+    connection:
+      host: dev-redis.example.com

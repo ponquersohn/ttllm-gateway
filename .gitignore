@@ -1,0 +1,88 @@
+# work
+/work/
+
+# local configs
+local.*.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Claude
+settings.local.json
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+sdist/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Install
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking / linting
+.mypy_cache/
+.pytype/
+.ruff_cache/
+.dmypy.json
+
+# Config local overrides
+local.config.yaml
+
+# Environments / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Database
+*.db
+*.sqlite3
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Docker (local overrides)
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/

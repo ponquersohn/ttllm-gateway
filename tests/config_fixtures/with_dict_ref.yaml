@@ -1,0 +1,12 @@
+default:
+  templates:
+    standard_output:
+      type: s3
+      params:
+        output_compression: gz
+  outputs:
+    main: "ref:templates.standard_output"
+
+dev:
+  outputs:
+    main: "ref:templates.standard_output"

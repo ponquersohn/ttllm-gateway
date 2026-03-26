@@ -1,0 +1,6 @@
+outputs:
+  main:
+    type: s3
+    params:
+      bucket: shared-bucket
+      output_compression: gz

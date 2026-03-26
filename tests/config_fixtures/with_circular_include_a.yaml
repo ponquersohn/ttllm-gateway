@@ -1,0 +1,6 @@
+default:
+  data:
+    include: with_circular_include_b.yaml
+
+dev:
+  enabled: true

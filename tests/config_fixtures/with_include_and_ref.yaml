@@ -1,0 +1,16 @@
+default:
+  vars:
+    region: us-east-1
+  settings:
+    include: shared/sqs_defaults.yaml
+    sqs:
+      region: "ref:vars.region"
+  engine:
+    log_level: INFO
+
+dev:
+  vars:
+    region: us-west-2
+  settings:
+    sqs:
+      queue_name: dev-queue

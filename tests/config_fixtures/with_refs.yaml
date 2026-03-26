@@ -1,0 +1,25 @@
+default:
+  vars:
+    region: us-east-1
+    bucket_prefix: my-app
+  sqs:
+    region: "ref:vars.region"
+  outputs:
+    main:
+      type: s3
+
+dev:
+  vars:
+    bucket_prefix: my-app-dev
+  outputs:
+    main:
+      params:
+        bucket: "ref:vars.bucket_prefix"
+
+prod:
+  vars:
+    bucket_prefix: my-app-prod
+  outputs:
+    main:
+      params:
+        bucket: "ref:vars.bucket_prefix"

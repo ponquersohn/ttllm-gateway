@@ -1,0 +1,18 @@
+default:
+  settings:
+    include: shared/sqs_defaults.yaml
+    sqs:
+      visibility_timeout: 600
+      queue_name: overridden-queue
+  engine:
+    log_level: INFO
+
+dev:
+  settings:
+    sqs:
+      queue_name: dev-queue
+
+prod:
+  settings:
+    sqs:
+      queue_name: prod-queue

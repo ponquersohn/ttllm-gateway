@@ -1,0 +1,5 @@
+sqs:
+  region: us-east-1
+  visibility_timeout: 300
+  wait_time_seconds: 20
+  max_messages: 1

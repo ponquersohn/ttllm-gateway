@@ -1,0 +1,27 @@
+default:
+  sqs:
+    region: us-east-1
+    visibility_timeout: 300
+  outputs:
+    main:
+      type: s3
+      params:
+        bucket: default-bucket
+  engine:
+    log_level: INFO
+
+dev:
+  sqs:
+    queue_name: my-queue-dev
+  outputs:
+    main:
+      params:
+        bucket: dev-bucket
+
+prod:
+  sqs:
+    queue_name: my-queue-prod
+  outputs:
+    main:
+      params:
+        bucket: prod-bucket

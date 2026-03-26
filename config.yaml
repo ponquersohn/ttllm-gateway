@@ -1,0 +1,74 @@
+default:
+  auth:
+    jwt:
+      secret_key: "env://TTLLM_JWT_SECRET"
+      algorithm: "HS256"
+      access_token_ttl_minutes: 15
+      refresh_token_ttl_days: 30
+      token_ttl_days: 365
+
+dev:
+  database:
+    url: "env://TTLLM_DATABASE_URL"
+    pool_size: 5
+  engine:
+    cors_origins:
+      - "*"
+    log_request_bodies: false
+  auth:
+    jwt:
+      secret_key: "env://TTLLM_JWT_SECRET,dev-secret-change-me"
+  provider:
+    default_region: "us-east-1"
+
+nonprod:
+  database:
+    url: "env://TTLLM_DATABASE_URL"
+    pool_size: 10
+  engine:
+    cors_origins:
+      - "env://TTLLM_CORS_ORIGIN,https://nonprod.example.com"
+    log_request_bodies: true
+  auth:
+    identity_providers:
+      entra:
+        name: "Entra ID"
+        type: "oidc"
+        client_id: "env://TTLLM_ENTRA_CLIENT_ID"
+        client_secret: "env://TTLLM_ENTRA_CLIENT_SECRET"
+        discovery_url: "env://TTLLM_ENTRA_DISCOVERY_URL"
+        scopes:
+          - "openid"
+          - "profile"
+          - "email"
+        default_groups:
+          - "users"
+  provider:
+    default_region: "env://AWS_REGION,us-east-1"
+
+prod:
+  database:
+    url: "secret://arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:ttllm/prod/database-url"
+    pool_size: 20
+  engine:
+    cors_origins:
+      - "env://TTLLM_CORS_ORIGIN,https://app.example.com"
+    log_request_bodies: false
+  auth:
+    jwt:
+      secret_key: "secret://arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:ttllm/prod/jwt-secret"
+    identity_providers:
+      entra:
+        name: "Entra ID"
+        type: "oidc"
+        client_id: "env://TTLLM_ENTRA_CLIENT_ID"
+        client_secret: "secret://arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:ttllm/prod/entra-client-secret"
+        discovery_url: "env://TTLLM_ENTRA_DISCOVERY_URL"
+        scopes:
+          - "openid"
+          - "profile"
+          - "email"
+        default_groups:
+          - "users"
+  provider:
+    default_region: "env://AWS_REGION,us-east-1"

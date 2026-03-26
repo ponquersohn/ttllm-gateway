@@ -1,0 +1,9 @@
+default:
+  data:
+    include: shared/nested_include.yaml
+  engine:
+    log_level: INFO
+
+dev:
+  data:
+    extra_key: overridden_in_dev

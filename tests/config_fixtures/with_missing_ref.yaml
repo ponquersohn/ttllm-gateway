@@ -1,0 +1,6 @@
+default:
+  sqs:
+    region: "ref:vars.nonexistent_key"
+
+dev:
+  enabled: true

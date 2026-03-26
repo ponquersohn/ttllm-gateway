@@ -1,0 +1,3 @@
+include: shared/sqs_defaults.yaml
+extra:
+  enabled: true

@@ -1,0 +1,2 @@
+include: deep/deep_shared.yaml
+extra_key: from_nested_include

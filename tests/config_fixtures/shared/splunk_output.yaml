@@ -1,0 +1,6 @@
+type: "splunk_hec"
+params:
+  hec_url: "https://splunk.example.com"
+  batch_size: 100
+  verify_ssl: true
+  timeout: 60

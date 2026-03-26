@@ -1,0 +1,6 @@
+default:
+  a: "ref:b"
+  b: "ref:a"
+
+dev:
+  enabled: true
