@@ -1,6 +1,7 @@
 """ECS / local development entrypoint via Uvicorn."""
 
 from ttllm.api.app import create_app
+from ttllm.config import settings
 
 app = create_app()
 
@@ -10,6 +11,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "ttllm.handlers.ecs_entrypoint:app",
         host="0.0.0.0",
-        port=8000,
+        port=settings.engine.listen_port,
         workers=4,
     )

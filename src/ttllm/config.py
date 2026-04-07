@@ -27,6 +27,7 @@ class DatabaseConfig(BaseModel):
 
 class EngineConfig(BaseModel):
     base_url: str = "http://localhost:4000"
+    listen_port: int = 8000
     cors_origins: list[str] = ["*"]
     log_request_bodies: bool = False
 

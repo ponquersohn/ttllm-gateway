@@ -1,5 +1,8 @@
 # TTLLM - LLM Gateway
 
+## Important Rules
+- **Keep README.md in sync**: When changing configuration options, CLI commands, Docker setup, release process, deployment, or any other topic covered in README.md, update the README to reflect those changes.
+
 ## Project Overview
 LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing requests through LangChain to any supported provider (Bedrock, OpenAI, etc.). Tracks tokens, costs, and maintains audit trails. Supports user management with per-user model access control.
 
