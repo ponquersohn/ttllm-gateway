@@ -25,12 +25,15 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
           # Read version from source
-          CODE_VERSION=$(python -c "
-          import re, pathlib
+          CODE_VERSION=$(python3 << 'PYEOF'
+          import pathlib
           text = pathlib.Path('src/ttllm/__init__.py').read_text()
-          m = re.search(r'__version__\s*=\s*[\"'\''](.*?)[\"'\'']', text)
-          print(m.group(1))
-          ")
+          for line in text.splitlines():
+              if line.startswith('__version__'):
+                  print(line.split('=', 1)[1].strip().strip('"').strip("'"))
+                  break
+          PYEOF
+          )
 
           echo "Tag version:  ${VERSION}"
           echo "Code version: ${CODE_VERSION}"
