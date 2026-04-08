@@ -18,6 +18,13 @@ docker-compose up
 
 This starts PostgreSQL and the API on port 8000. Migrations run automatically on container start.
 
+A default admin account is created by the migrations:
+
+- **Email:** `admin@localhost`
+- **Password:** value of `TTLLM_ADMIN_PASSWORD` (defaults to `admin`)
+
+Set `TTLLM_ADMIN_PASSWORD` before running migrations to use a custom password. Log in via `ttllm login` and change the password or create a new admin user immediately.
+
 ### Run from Docker Image
 
 ```bash
