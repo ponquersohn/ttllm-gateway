@@ -3,10 +3,25 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ttllm"
-version = "0.1.0"
+name = "ttllm-gateway"
+dynamic = ["version"]
 description = "LLM Gateway with Anthropic-compatible API"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
+authors = [
+    { name = "Lech Lachowicz", email = "lech.lachowicz@gmail.com" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -43,6 +58,14 @@ dev = [
 
 [project.scripts]
 ttllm = "ttllm.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/ponquersohn/ttllm-gateway"
+Repository = "https://github.com/ponquersohn/ttllm-gateway"
+Issues = "https://github.com/ponquersohn/ttllm-gateway/issues"
+
+[tool.hatch.version]
+path = "src/ttllm/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ttllm"]

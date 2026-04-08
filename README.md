@@ -63,6 +63,12 @@ docker run -p 8000:8000 \
   ghcr.io/ponquersohn/ttllm-gateway:latest
 ```
 
+### Install from PyPI
+
+```bash
+pip install ttllm-gateway
+```
+
 ### Run Locally
 
 ```bash
@@ -127,7 +133,7 @@ ttllm audit-logs [--user] [--model] [--limit]
 
 ## Releasing
 
-Releases are created from the `main` branch. The Makefile shows the commands to run:
+Releases are created from the `main` branch. The Makefile bumps the version in `src/ttllm/__init__.py` and shows the commands to complete the release:
 
 ```bash
 make release         # Patch bump (v0.0.1 -> v0.0.2)
@@ -135,7 +141,11 @@ make release-minor   # Minor bump (v0.1.0 -> v0.2.0)
 make release-major   # Major bump (v1.0.0 -> v2.0.0)
 ```
 
-These commands display (but do not execute) the `git tag` and `gh release create` commands. Publishing a GitHub release triggers the CI workflow to build and push the Docker image to `ghcr.io/ponquersohn/ttllm-gateway`.
+After running `make release*`, follow the printed instructions to commit, tag, push, and create the GitHub release. Publishing a GitHub release triggers the CI workflow to:
+
+1. **Validate** that the git tag matches the `__version__` in code
+2. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/)
+3. **Build and push** the Docker image to `ghcr.io/ponquersohn/ttllm-gateway`
 
 ## Development
 

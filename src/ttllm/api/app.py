@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from ttllm import __version__
 from ttllm.config import settings
 
 
@@ -13,7 +14,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="TTLLM Gateway",
         description="LLM Gateway with Anthropic-compatible API",
-        version="0.1.0",
+        version=__version__,
     )
 
     # CORS
