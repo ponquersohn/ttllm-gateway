@@ -52,6 +52,17 @@ docker run -p 8000:8000 \
 
 The container listens on port 8000 by default (configurable via `engine.listen_port`). Map it to any host port with `-p <host>:<container>`.
 
+#### Debugging failed containers
+
+By default the container exits on error. Set `TTLLM_EXIT_ON_ERROR=false` to keep the container alive after a failure, so you can exec into it for debugging:
+
+```bash
+docker run -p 8000:8000 \
+  -e TTLLM_EXIT_ON_ERROR=false \
+  -e TTLLM_DATABASE__URL="postgresql+asyncpg://user:pass@host:5432/ttllm" \
+  ghcr.io/ponquersohn/ttllm-gateway:latest
+```
+
 ### Run Locally
 
 ```bash

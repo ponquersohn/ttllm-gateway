@@ -11,8 +11,9 @@ COPY src/ src/
 COPY alembic.ini .
 COPY alembic/ alembic/
 
-RUN pip install --no-cache-dir -e .
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh && pip install --no-cache-dir -e .
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "alembic upgrade head && python -m ttllm.handlers.ecs_entrypoint"]
+ENTRYPOINT ["./entrypoint.sh"]
