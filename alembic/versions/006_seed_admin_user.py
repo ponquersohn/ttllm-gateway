@@ -42,7 +42,7 @@ def upgrade() -> None:
     conn.execute(
         sa.text(
             "INSERT INTO users (id, name, email, password_hash, is_active, created_at, updated_at) "
-            "VALUES (:id, :name, :email, :pw, true, now(), now())"
+            "VALUES (:id, :name, :email, :password_hash, true, now(), now())"
         ),
         {
             "id": user_id,
