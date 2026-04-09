@@ -232,7 +232,7 @@ from anthropic import Anthropic
 
 client = Anthropic(
     api_key="<your-gateway-token>",
-    base_url="https://gateway.example.com/anthropic/v1",
+    base_url="https://gateway.example.com/anthropic",
 )
 
 message = client.messages.create(
@@ -250,7 +250,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const client = new Anthropic({
   apiKey: "<your-gateway-token>",
-  baseURL: "https://gateway.example.com/anthropic/v1",
+  baseURL: "https://gateway.example.com/anthropic",
 });
 
 const message = await client.messages.create({
@@ -266,7 +266,7 @@ console.log(message.content[0].text);
 
 ```bash
 export ANTHROPIC_API_KEY="<your-gateway-token>"
-export ANTHROPIC_BASE_URL="https://gateway.example.com/anthropic/v1"
+export ANTHROPIC_BASE_URL="https://gateway.example.com/anthropic"
 export ANTHROPIC_MODEL="<one model>"
 export ANTHROPIC_MODEL="<second model>"
 ```
@@ -277,7 +277,7 @@ export ANTHROPIC_MODEL="<second model>"
 
 ```bash
 export ANTHROPIC_API_KEY="<your-gateway-token>"
-export ANTHROPIC_BASE_URL="https://gateway.example.com/anthropic/v1"
+export ANTHROPIC_BASE_URL="https://gateway.example.com/anthropic"
 export ANTHROPIC_MODEL="<one model>"
 export ANTHROPIC_MODEL="<second model>"
 
@@ -291,7 +291,7 @@ If that works you can probably set the settings in `.claude/settings.local.yaml`
 {
   "env": {
     "ANTHROPIC_API_KEY": "<your-gateway-token>",
-    "ANTHROPIC_BASE_URL": "https://gateway.example.com/anthropic/v1",
+    "ANTHROPIC_BASE_URL": "https://gateway.example.com/anthropic",
     "ANTHROPIC_MODEL": "<one model>",
     "ANTHROPIC_SMALL_FAST_MODEL": "<second model>",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
@@ -334,7 +334,7 @@ This revokes your refresh token on the server and removes the local session file
 | `TTLLM_URL` | CLI | `http://localhost:4000` | Gateway base URL |
 | `TTLLM_TOKEN` | `ttllm chat` | -- | Gateway token for API calls |
 | `ANTHROPIC_API_KEY` | SDKs | -- | Gateway token (SDK usage) |
-| `ANTHROPIC_BASE_URL` | SDKs | -- | Gateway URL with `/anthropic/v1` suffix |
+| `ANTHROPIC_BASE_URL` | SDKs | -- | Gateway URL with `/anthropic` suffix |
 
 ## Troubleshooting
 
