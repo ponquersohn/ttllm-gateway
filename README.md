@@ -236,6 +236,10 @@ After running `make release*`, follow the printed instructions to commit, tag, p
 2. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/)
 3. **Build and push** the Docker image to `ghcr.io/ponquersohn/ttllm-gateway`
 
+## User Guide
+
+For end-user documentation covering login, token creation, API usage, SDK integration, and Claude Code setup, see [docs/user-guide.md](docs/user-guide.md).
+
 ## Development
 
 ```bash

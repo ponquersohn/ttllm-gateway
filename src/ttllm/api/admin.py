@@ -45,7 +45,7 @@ from ttllm.schemas.auth import (
     UserPermissionAssign,
 )
 from ttllm.schemas.common import PaginatedResponse
-from ttllm.services import audit_service, auth_service, group_service, model_service, secret_service, user_service
+from ttllm.services import audit_service, auth_service, group_service, model_service, secret_service, usage_service, user_service
 from ttllm.api.me import _build_whoami
 
 router = APIRouter(prefix="/admin", tags=["admin"])
