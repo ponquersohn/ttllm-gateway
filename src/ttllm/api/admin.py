@@ -7,6 +7,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ttllm import __version__
 from ttllm.api.deps import AuthContext, DB, get_authenticated, require_permission
 from ttllm.core.permissions import Permissions
 from ttllm.schemas.admin import (
@@ -21,6 +22,7 @@ from ttllm.schemas.admin import (
     SecretCreate,
     SecretResponse,
     SecretUpdate,
+    ServerStatusResponse,
     UsageSummaryResponse,
     UserCreate,
     UserResponse,
@@ -63,6 +65,17 @@ async def whoami(
         effective_permissions=sorted(ctx.permissions),
         available_permissions=sorted(all_perms),
     )
+
+
+# --- Status ---
+
+
+@router.get("/status", response_model=ServerStatusResponse)
+async def server_status(
+    ctx: AuthContext = Depends(require_permission(Permissions.SERVER_STATUS)),
+):
+    """Return server version and status."""
+    return ServerStatusResponse(version=__version__, status="ok")
 
 
 # --- Helpers ---
@@ -558,7 +571,7 @@ async def list_tokens(
 async def revoke_token(
     token_id: uuid.UUID,
     db: DB,
-    ctx: AuthContext = Depends(require_permission(Permissions.TOKEN_REVOKE)),
+    ctx: AuthContext = Depends(require_permission(Permissions.TOKEN_DELETE)),
 ):
     revoked = await auth_service.revoke_token(db, token_id)
     if not revoked:

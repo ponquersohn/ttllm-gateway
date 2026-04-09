@@ -178,6 +178,7 @@ At runtime, `secret://` references are resolved transparently before the provide
 Admin operations via the `ttllm` CLI:
 
 ```bash
+ttllm status                         # Show server version and status
 ttllm users list|show|create|update|delete
 ttllm models list|show|create|update|delete|assign|unassign
 ttllm groups list|show|create|update|delete

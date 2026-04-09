@@ -281,6 +281,18 @@ def whoami(
             console.print(f"  - [dim]{p}[/dim]")
 
 
+@app.command("status")
+def status(as_json: bool = JSON_OPTION):
+    """Show server version and status."""
+    with _client() as client:
+        data = _handle_response(client.get("/admin/status"))
+    if as_json:
+        _print_json(data)
+        return
+    console.print(f"[bold]Version:[/bold] {data['version']}")
+    console.print(f"[bold]Status:[/bold]  {data['status']}")
+
+
 # --- Users ---
 
 
@@ -1045,10 +1057,12 @@ def secrets_list(
 @secrets_app.command("create")
 def secrets_create(
     name: str = typer.Option(..., "--name", help="Secret name"),
+    value: Optional[str] = typer.Option(None, "--value", help="Secret value (if omitted, prompted with hidden input)"),
     description: Optional[str] = typer.Option(None, "--description", help="Description"),
 ):
     """Create a new secret. Value is prompted with hidden input."""
-    value = typer.prompt("Secret value", hide_input=True)
+    if value is None:
+        value = typer.prompt("Secret value", hide_input=True)
     body: dict = {"name": name, "value": value}
     if description:
         body["description"] = description

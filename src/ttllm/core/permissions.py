@@ -77,11 +77,14 @@ class Permissions:
 
     # --- Token ---
     TOKEN_CREATE = _define("token.create", "Generate gateway tokens", "management")
-    TOKEN_REVOKE = _define("token.revoke", "Revoke gateway tokens", "management")
+    TOKEN_DELETE = _define("token.delete", "Revoke gateway tokens", "management")
 
     # --- Audit / Usage ---
     AUDIT_VIEW = _define("audit.view", "View audit logs", "management")
     USAGE_VIEW = _define("usage.view", "View usage statistics", "management")
+
+    # --- Server ---
+    SERVER_STATUS = _define("server.status", "View server version and status", "management")
 
     # --- Gateway ---
     LLM_INVOKE = _define("llm.invoke", "Invoke LLM models through the gateway", "gateway")

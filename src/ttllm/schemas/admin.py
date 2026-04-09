@@ -161,3 +161,11 @@ class SecretResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# --- Server ---
+
+
+class ServerStatusResponse(BaseModel):
+    version: str
+    status: str

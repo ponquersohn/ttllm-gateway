@@ -85,7 +85,7 @@ class TestPermissionsClass:
 
     def test_registry_has_all_permissions(self):
         registry = Permissions.get_registry()
-        assert len(registry.permissions) == 22
+        assert len(registry.permissions) == 23
 
     def test_registry_contains_all_constants(self):
         registry = Permissions.get_registry()
