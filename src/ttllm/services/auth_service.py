@@ -302,6 +302,10 @@ async def revoke_token(
     return True
 
 
+async def get_token(db: AsyncSession, token_id: uuid.UUID) -> Token | None:
+    return await db.get(Token, token_id)
+
+
 async def list_tokens(
     db: AsyncSession,
     user_id: uuid.UUID | None = None,

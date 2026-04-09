@@ -19,6 +19,10 @@ class ProviderRegistry:
         self._cache: OrderedDict[str, BaseChatModel] = OrderedDict()
         self._max_cache_size = max_cache_size
 
+    def clear_cache(self) -> None:
+        """Evict all cached provider clients (e.g. after a secret changes)."""
+        self._cache.clear()
+
     def register(
         self, name: str, factory: Callable[[Any, dict[str, Any]], BaseChatModel]
     ) -> None:

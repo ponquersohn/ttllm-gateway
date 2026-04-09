@@ -69,6 +69,10 @@ class ProviderConfig(BaseModel):
     default_region: str = "us-east-1"
 
 
+class SecretsConfig(BaseModel):
+    encryption_key: str = ""
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TTLLM_", env_nested_delimiter="__")
 
@@ -76,6 +80,7 @@ class Settings(BaseSettings):
     engine: EngineConfig = EngineConfig()
     auth: AuthConfig = AuthConfig()
     provider: ProviderConfig = ProviderConfig()
+    secrets: SecretsConfig = SecretsConfig()
 
 
 # --- YAML ConfigLoader ---

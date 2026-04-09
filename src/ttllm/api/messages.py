@@ -14,9 +14,24 @@ from ttllm.config import settings
 from ttllm.core import gateway
 from ttllm.core.permissions import Permissions
 from ttllm.schemas.anthropic import MessagesRequest
-from ttllm.services import audit_service, model_service
+from ttllm.services import audit_service, model_service, secret_service
 
 router = APIRouter()
+
+
+class _ModelProxy:
+    """Lightweight proxy that overrides config_json with resolved secrets."""
+
+    def __init__(self, model, resolved_config: dict):
+        self._model = model
+        self._resolved_config = resolved_config
+
+    @property
+    def config_json(self):
+        return self._resolved_config
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
 
 
 async def get_anthropic_authenticated(
@@ -58,15 +73,19 @@ async def create_message(
             },
         )
 
+    # Resolve secret:// references in model config without mutating the ORM object
+    resolved_config = await secret_service.resolve_model_config(db, llm_model.config_json or {})
+    resolved_model = _ModelProxy(llm_model, resolved_config)
+
     metadata = {
         "client_ip": request.client.host if request.client else None,
         "user_agent": request.headers.get("user-agent"),
     }
 
     if body.stream:
-        return await _handle_streaming(body, llm_model, ctx.user, db, request_id, metadata)
+        return await _handle_streaming(body, resolved_model, ctx.user, db, request_id, metadata)
     else:
-        return await _handle_invoke(body, llm_model, ctx.user, db, request_id, metadata)
+        return await _handle_invoke(body, resolved_model, ctx.user, db, request_id, metadata)
 
 
 async def _handle_invoke(body, llm_model, user, db, request_id, metadata):

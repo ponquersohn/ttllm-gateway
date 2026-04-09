@@ -98,6 +98,7 @@ Settings are resolved in order: YAML config file -> environment variables -> def
 | `TTLLM_ENGINE__CORS_ORIGINS` | Allowed CORS origins | `["*"]` |
 | `TTLLM_AUTH__JWT__SECRET_KEY` | JWT signing secret | `CHANGE-ME-IN-PRODUCTION` |
 | `TTLLM_PROVIDER__DEFAULT_REGION` | AWS region for Bedrock | `us-east-1` |
+| `TTLLM_SECRETS__ENCRYPTION_KEY` | Fernet key for encrypting secrets | _(none)_ |
 
 Nested env vars use `__` as delimiter. YAML values support `env://VAR,default` and `secret://arn` resolution patterns. Local overrides via `local.config.yaml` (git-ignored).
 
@@ -125,16 +126,64 @@ dev:
         client_id: "..."
   provider:
     default_region: "us-east-1"
+  secrets:
+    encryption_key: "env://TTLLM_SECRETS_ENCRYPTION_KEY"
 ```
+
+## Secrets Management
+
+Provider credentials (AWS keys, API keys, etc.) can be stored encrypted in the database and
+referenced from model configs using `secret://name`. This avoids storing plaintext credentials
+in `config_json`.
+
+### Setup
+
+1. Generate an encryption key and add it to your config:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Add to `config.yaml`:
+
+```yaml
+dev:
+  secrets:
+    encryption_key: "your-generated-key"
+```
+
+Or via environment variable: `TTLLM_SECRETS__ENCRYPTION_KEY`.
+
+2. Create secrets:
+
+```bash
+ttllm secrets create --name aws-bedrock-key        # prompts for value (hidden)
+ttllm secrets create --name aws-bedrock-secret      # prompts for value (hidden)
+```
+
+3. Reference secrets in model config:
+
+```bash
+ttllm models create \
+  --name claude-sonnet \
+  --provider bedrock \
+  --provider-model-id anthropic.claude-3-sonnet-20240229-v1:0 \
+  --config '{"aws_access_key_id":"secret://aws-bedrock-key","aws_secret_access_key":"secret://aws-bedrock-secret","region":"us-west-2"}'
+```
+
+At runtime, `secret://` references are resolved transparently before the provider client is created. Secret values are never exposed through the API or CLI.
 
 ## CLI
 
 Admin operations via the `ttllm` CLI:
 
 ```bash
-ttllm users list|create|deactivate|create-key
-ttllm models list|add|assign|unassign
-ttllm usage [--user] [--model] [--since] [--until]
+ttllm users list|show|create|update|delete
+ttllm models list|show|create|update|delete|assign|unassign
+ttllm groups list|show|create|update|delete
+ttllm tokens list|show|create|delete
+ttllm secrets list|show|create|update|delete
+ttllm usage summary|costs [--user] [--model] [--since] [--until]
 ttllm audit-logs [--user] [--model] [--limit]
 ```
 

@@ -31,6 +31,7 @@ users_app = typer.Typer(help="Manage users")
 models_app = typer.Typer(help="Manage models")
 groups_app = typer.Typer(help="Manage groups")
 tokens_app = typer.Typer(help="Manage tokens")
+secrets_app = typer.Typer(help="Manage secrets")
 usage_app = typer.Typer(help="View usage and costs")
 audit_app = typer.Typer(help="View audit logs")
 
@@ -38,6 +39,7 @@ app.add_typer(users_app, name="users")
 app.add_typer(models_app, name="models")
 app.add_typer(groups_app, name="groups")
 app.add_typer(tokens_app, name="tokens")
+app.add_typer(secrets_app, name="secrets")
 app.add_typer(usage_app, name="usage")
 app.add_typer(audit_app, name="audit-logs")
 
@@ -404,16 +406,44 @@ def users_models(
     console.print(table)
 
 
-@users_app.command("deactivate")
-def users_deactivate(
-    user_id: str = typer.Argument(help="User ID"),
+@users_app.command("update")
+def users_update(
+    user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
+    name: Optional[str] = typer.Option(None, "--name", help="New name"),
+    email: Optional[str] = typer.Option(None, "--email", help="New email"),
+    password: Optional[str] = typer.Option(None, "--password", help="New password"),
+    use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
+):
+    """Update a user's details."""
+    body: dict = {}
+    if name is not None:
+        body["name"] = name
+    if email is not None:
+        body["email"] = email
+    if password is not None:
+        body["password"] = password
+    if not body:
+        console.print("[red]Nothing to update. Provide --name, --email, or --password.[/red]")
+        raise typer.Exit(1)
+    with _client() as client:
+        user_id = user if use_ids else _resolve_user(client, user)
+        data = _handle_response(client.patch(f"/admin/users/{user_id}", json=body))
+    console.print(f"[green]User updated:[/green] {data['name']}")
+
+
+@users_app.command("delete")
+def users_delete(
+    user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
+    use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
 ):
     """Deactivate a user."""
     with _client() as client:
-        data = _handle_response(
-            client.patch(f"/admin/users/{user_id}", json={"is_active": False})
-        )
-    console.print(f"[yellow]User deactivated:[/yellow] {data['id']}")
+        user_id = user if use_ids else _resolve_user(client, user)
+        resp = client.delete(f"/admin/users/{user_id}")
+        if resp.status_code == 204:
+            console.print("[green]User deactivated.[/green]")
+        else:
+            _handle_response(resp)
 
 
 @users_app.command("permissions")
@@ -515,8 +545,35 @@ def models_list(
     console.print(table)
 
 
-@models_app.command("add")
-def models_add(
+@models_app.command("show")
+def models_show(
+    model: str = typer.Argument(help="Model name (or ID with --use-ids)"),
+    use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
+    as_json: bool = JSON_OPTION,
+):
+    """Show model details."""
+    with _client() as client:
+        model_id = model if use_ids else _resolve_model(client, model)
+        data = _handle_response(client.get(f"/admin/models/{model_id}"))
+
+    if as_json:
+        _print_json(data)
+        return
+
+    console.print(f"[bold]Model:[/bold] {data['name']}")
+    console.print(f"  ID: {data['id']}")
+    console.print(f"  Provider: {data['provider']}")
+    console.print(f"  Provider Model ID: {data['provider_model_id']}")
+    console.print(f"  Input cost/1K: {data['input_cost_per_1k']}")
+    console.print(f"  Output cost/1K: {data['output_cost_per_1k']}")
+    console.print(f"  Active: {'Yes' if data['is_active'] else 'No'}")
+    console.print(f"  Created: {data['created_at'][:10]}")
+    if data.get("config_json"):
+        console.print(f"  Config: {json.dumps(data['config_json'])}")
+
+
+@models_app.command("create")
+def models_create(
     name: str = typer.Option(..., help="Model display name"),
     provider: str = typer.Option(..., help="Provider (bedrock, openai, etc.)"),
     provider_model_id: str = typer.Option(..., help="Provider-specific model ID"),
@@ -710,6 +767,70 @@ def groups_create(
     console.print(f"  Name: {data['name']}")
 
 
+@groups_app.command("show")
+def groups_show(
+    group: str = typer.Argument(help="Group name (or ID with --use-ids)"),
+    use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
+    as_json: bool = JSON_OPTION,
+):
+    """Show group details."""
+    with _client() as client:
+        group_id = group if use_ids else _resolve_group(client, group)
+        data = _handle_response(client.get(f"/admin/groups/{group_id}"))
+
+    if as_json:
+        _print_json(data)
+        return
+
+    console.print(f"[bold]Group:[/bold] {data['name']}")
+    console.print(f"  ID: {data['id']}")
+    console.print(f"  Description: {data.get('description') or '(none)'}")
+    console.print(f"  Active: {'Yes' if data['is_active'] else 'No'}")
+    console.print(f"  Created: {data['created_at'][:10]}")
+    perms = data.get("permissions", [])
+    if perms:
+        console.print(f"\n[bold]Permissions:[/bold] {', '.join(perms)}")
+    else:
+        console.print("\n[bold]Permissions:[/bold] (none)")
+
+
+@groups_app.command("update")
+def groups_update(
+    group: str = typer.Argument(help="Group name (or ID with --use-ids)"),
+    name: Optional[str] = typer.Option(None, "--name", help="New group name"),
+    description: Optional[str] = typer.Option(None, "--description", help="New description"),
+    use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
+):
+    """Update a group's name or description."""
+    body: dict = {}
+    if name is not None:
+        body["name"] = name
+    if description is not None:
+        body["description"] = description
+    if not body:
+        console.print("[red]Nothing to update. Provide --name or --description.[/red]")
+        raise typer.Exit(1)
+    with _client() as client:
+        group_id = group if use_ids else _resolve_group(client, group)
+        data = _handle_response(client.patch(f"/admin/groups/{group_id}", json=body))
+    console.print(f"[green]Group updated:[/green] {data['name']}")
+
+
+@groups_app.command("delete")
+def groups_delete(
+    group: str = typer.Argument(help="Group name (or ID with --use-ids)"),
+    use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
+):
+    """Delete a group."""
+    with _client() as client:
+        group_id = group if use_ids else _resolve_group(client, group)
+        resp = client.delete(f"/admin/groups/{group_id}")
+        if resp.status_code == 204:
+            console.print("[green]Group deleted.[/green]")
+        else:
+            _handle_response(resp)
+
+
 @groups_app.command("add-permission")
 def groups_add_permission(
     group_id: str = typer.Argument(help="Group ID"),
@@ -796,6 +917,29 @@ def tokens_create(
     console.print("[yellow]Save this token now -- it will not be shown again.[/yellow]")
 
 
+@tokens_app.command("show")
+def tokens_show(
+    token_id: str = typer.Argument(help="Token ID"),
+    as_json: bool = JSON_OPTION,
+):
+    """Show token details (token value is never displayed)."""
+    with _client() as client:
+        data = _handle_response(client.get(f"/admin/tokens/{token_id}"))
+
+    if as_json:
+        _print_json(data)
+        return
+
+    console.print(f"[bold]Token:[/bold] {data['id'][:5]}...")
+    console.print(f"  ID: {data['id']}")
+    console.print(f"  User: {data.get('user_email') or data['user_id']}")
+    console.print(f"  Label: {data.get('label') or '(none)'}")
+    console.print(f"  Permissions: {', '.join(data.get('permissions', []))}")
+    console.print(f"  Active: {'Yes' if data['is_active'] else 'No'}")
+    console.print(f"  Created: {data['created_at'][:19]}")
+    console.print(f"  Expires: {(data.get('expires_at') or 'never')[:19]}")
+
+
 @tokens_app.command("list")
 def tokens_list(
     user_id: Optional[str] = typer.Option(None, "--user", help="Filter by user ID"),
@@ -836,8 +980,8 @@ def tokens_list(
     console.print(table)
 
 
-@tokens_app.command("revoke")
-def tokens_revoke(
+@tokens_app.command("delete")
+def tokens_delete(
     token_id: str = typer.Argument(help="Token ID to revoke"),
 ):
     """Revoke a token."""
@@ -845,6 +989,126 @@ def tokens_revoke(
         resp = client.delete(f"/admin/tokens/{token_id}")
         if resp.status_code == 204:
             console.print("[green]Token revoked.[/green]")
+        else:
+            _handle_response(resp)
+
+
+# --- Secrets ---
+
+
+def _resolve_secret(client: httpx.Client, name: str) -> str:
+    """Resolve a secret name to a secret ID."""
+    data = _handle_response(client.get("/admin/secrets", params={"limit": 200}))
+    needle = name.lower()
+    for s in data["items"]:
+        if s["name"].lower() == needle:
+            return s["id"]
+    console.print(f"[red]Secret not found: {name}[/red]")
+    raise typer.Exit(1)
+
+
+@secrets_app.command("list")
+def secrets_list(
+    offset: int = typer.Option(0, help="Offset for pagination"),
+    limit: int = typer.Option(50, help="Limit for pagination"),
+    as_json: bool = JSON_OPTION,
+):
+    """List all secrets (values are never shown)."""
+    with _client() as client:
+        data = _handle_response(
+            client.get("/admin/secrets", params={"offset": offset, "limit": limit})
+        )
+
+    if as_json:
+        _print_json(data)
+        return
+
+    table = Table(title="Secrets")
+    table.add_column("ID", style="dim")
+    table.add_column("Name")
+    table.add_column("Description")
+    table.add_column("Created")
+    table.add_column("Updated")
+
+    for s in data["items"]:
+        table.add_row(
+            s["id"][:8] + "...",
+            s["name"],
+            s.get("description") or "-",
+            s["created_at"][:10],
+            s["updated_at"][:10],
+        )
+    console.print(table)
+    console.print(f"Total: {data['total']}")
+
+
+@secrets_app.command("create")
+def secrets_create(
+    name: str = typer.Option(..., "--name", help="Secret name"),
+    description: Optional[str] = typer.Option(None, "--description", help="Description"),
+):
+    """Create a new secret. Value is prompted with hidden input."""
+    value = typer.prompt("Secret value", hide_input=True)
+    body: dict = {"name": name, "value": value}
+    if description:
+        body["description"] = description
+    with _client() as client:
+        data = _handle_response(client.post("/admin/secrets", json=body))
+    console.print(f"[green]Secret created:[/green] {data['name']}")
+
+
+@secrets_app.command("show")
+def secrets_show(
+    name: str = typer.Argument(help="Secret name"),
+    as_json: bool = JSON_OPTION,
+):
+    """Show secret metadata (value is never displayed)."""
+    with _client() as client:
+        secret_id = _resolve_secret(client, name)
+        data = _handle_response(client.get(f"/admin/secrets/{secret_id}"))
+
+    if as_json:
+        _print_json(data)
+        return
+
+    console.print(f"[bold]Secret:[/bold] {data['name']}")
+    console.print(f"  ID: {data['id']}")
+    console.print(f"  Description: {data.get('description') or '(none)'}")
+    console.print(f"  Created: {data['created_at'][:19]}")
+    console.print(f"  Updated: {data['updated_at'][:19]}")
+
+
+@secrets_app.command("update")
+def secrets_update(
+    name: str = typer.Argument(help="Secret name"),
+    prompt_value: bool = typer.Option(False, "--prompt-value", help="Prompt for a new secret value"),
+    description: Optional[str] = typer.Option(None, "--description", help="New description"),
+):
+    """Update a secret's value or description."""
+    body: dict = {}
+    if prompt_value:
+        body["value"] = typer.prompt("New secret value", hide_input=True)
+    if description is not None:
+        body["description"] = description
+    if not body:
+        console.print("[red]Nothing to update. Provide --prompt-value or --description.[/red]")
+        raise typer.Exit(1)
+    with _client() as client:
+        secret_id = _resolve_secret(client, name)
+        data = _handle_response(client.patch(f"/admin/secrets/{secret_id}", json=body))
+    console.print(f"[green]Secret updated:[/green] {data['name']}")
+
+
+@secrets_app.command("delete")
+def secrets_delete(
+    name: str = typer.Argument(help="Secret name"),
+):
+    """Delete a secret."""
+    with _client() as client:
+        secret_id = _resolve_secret(client, name)
+        resp = client.delete(f"/admin/secrets/{secret_id}")
+        if resp.status_code == 204:
+            console.print("[green]Secret deleted.[/green]")
         else:
             _handle_response(resp)
 

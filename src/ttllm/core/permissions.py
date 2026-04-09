@@ -69,6 +69,12 @@ class Permissions:
     MODEL_DELETE = _define("model.delete", "Deactivate LLM models", "management")
     MODEL_ASSIGN = _define("model.assign", "Assign/unassign models to users", "management")
 
+    # --- Secret ---
+    SECRET_VIEW = _define("secret.view", "View stored secrets", "management")
+    SECRET_CREATE = _define("secret.create", "Create new secrets", "management")
+    SECRET_MODIFY = _define("secret.modify", "Update secret values", "management")
+    SECRET_DELETE = _define("secret.delete", "Delete secrets", "management")
+
     # --- Token ---
     TOKEN_CREATE = _define("token.create", "Generate gateway tokens", "management")
     TOKEN_REVOKE = _define("token.revoke", "Revoke gateway tokens", "management")

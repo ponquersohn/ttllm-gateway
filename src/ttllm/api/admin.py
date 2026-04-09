@@ -18,6 +18,9 @@ from ttllm.schemas.admin import (
     ModelCreate,
     ModelResponse,
     ModelUpdate,
+    SecretCreate,
+    SecretResponse,
+    SecretUpdate,
     UsageSummaryResponse,
     UserCreate,
     UserResponse,
@@ -36,7 +39,7 @@ from ttllm.schemas.auth import (
     UserPermissionAssign,
 )
 from ttllm.schemas.common import PaginatedResponse
-from ttllm.services import audit_service, auth_service, group_service, model_service, user_service
+from ttllm.services import audit_service, auth_service, group_service, model_service, secret_service, user_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -160,6 +163,17 @@ async def update_user(
     return _user_response(user, groups)
 
 
+@router.delete("/users/{user_id}", status_code=204)
+async def delete_user(
+    user_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.USER_DELETE)),
+):
+    user = await user_service.deactivate_user(db, user_id)
+    if not user:
+        raise HTTPException(404, detail={"type": "not_found", "message": "User not found"})
+
+
 # --- User Permissions ---
 
 
@@ -233,6 +247,18 @@ async def list_models(
         offset=offset,
         limit=limit,
     )
+
+
+@router.get("/models/{model_id}", response_model=ModelResponse)
+async def get_model(
+    model_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.MODEL_VIEW)),
+):
+    model = await model_service.get_model(db, model_id)
+    if not model:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Model not found"})
+    return ModelResponse.model_validate(model)
 
 
 @router.post("/models", response_model=ModelResponse, status_code=201)
@@ -493,6 +519,22 @@ async def create_token(
         raise HTTPException(400, detail={"type": "invalid_request", "message": str(e)})
 
 
+@router.get("/tokens/{token_id}", response_model=TokenResponse)
+async def get_token_detail(
+    token_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.TOKEN_CREATE)),
+):
+    token = await auth_service.get_token(db, token_id)
+    if not token:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Token not found"})
+    resp = TokenResponse.model_validate(token)
+    user = await user_service.get_user(db, token.user_id)
+    if user:
+        resp.user_email = user.email
+    return resp
+
+
 @router.get("/tokens", response_model=list[TokenResponse])
 async def list_tokens(
     db: DB,
@@ -553,6 +595,83 @@ async def get_costs(
     return await usage_service.get_cost_breakdown(
         db, user_id=user_id, model_id=model_id, since=since, until=until
     )
+
+
+# --- Secrets ---
+
+
+@router.get("/secrets", response_model=PaginatedResponse[SecretResponse])
+async def list_secrets(
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.SECRET_VIEW)),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    secrets, total = await secret_service.list_secrets(db, offset=offset, limit=limit)
+    return PaginatedResponse(
+        items=[SecretResponse.model_validate(s) for s in secrets],
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post("/secrets", response_model=SecretResponse, status_code=201)
+async def create_secret(
+    body: SecretCreate,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.SECRET_CREATE)),
+):
+    existing = await secret_service.get_secret_by_name(db, body.name)
+    if existing:
+        raise HTTPException(409, detail={"type": "conflict", "message": f"Secret '{body.name}' already exists"})
+    secret = await secret_service.create_secret(
+        db, name=body.name, plaintext_value=body.value, description=body.description,
+    )
+    return SecretResponse.model_validate(secret)
+
+
+@router.get("/secrets/{secret_id}", response_model=SecretResponse)
+async def get_secret(
+    secret_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.SECRET_VIEW)),
+):
+    secret = await secret_service.get_secret(db, secret_id)
+    if not secret:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Secret not found"})
+    return SecretResponse.model_validate(secret)
+
+
+@router.patch("/secrets/{secret_id}", response_model=SecretResponse)
+async def update_secret(
+    secret_id: uuid.UUID,
+    body: SecretUpdate,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.SECRET_MODIFY)),
+):
+    kwargs: dict = {}
+    if body.value is not None:
+        kwargs["plaintext_value"] = body.value
+    if body.description is not None:
+        kwargs["description"] = body.description
+    if not kwargs:
+        raise HTTPException(400, detail={"type": "invalid_request", "message": "Nothing to update"})
+    secret = await secret_service.update_secret(db, secret_id, **kwargs)
+    if not secret:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Secret not found"})
+    return SecretResponse.model_validate(secret)
+
+
+@router.delete("/secrets/{secret_id}", status_code=204)
+async def delete_secret(
+    secret_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.SECRET_DELETE)),
+):
+    deleted = await secret_service.delete_secret(db, secret_id)
+    if not deleted:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Secret not found"})
 
 
 # --- Audit Logs ---

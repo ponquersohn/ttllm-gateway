@@ -137,3 +137,27 @@ class CostBreakdownItem(BaseModel):
     input_tokens: int
     output_tokens: int
     total_cost: str
+
+
+# --- Secrets ---
+
+
+class SecretCreate(BaseModel):
+    name: str
+    value: str
+    description: str | None = None
+
+
+class SecretUpdate(BaseModel):
+    value: str | None = None
+    description: str | None = None
+
+
+class SecretResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}

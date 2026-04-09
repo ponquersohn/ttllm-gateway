@@ -31,9 +31,12 @@ pytest                               # Run tests
 uvicorn ttllm.handlers.ecs_entrypoint:app --reload  # Dev server
 
 # CLI (admin operations)
-ttllm users list|create|deactivate|create-key
-ttllm models list|add|assign|unassign
-ttllm usage [--user] [--model] [--since] [--until]
+ttllm users list|show|create|update|delete
+ttllm models list|show|create|update|delete|assign|unassign
+ttllm groups list|show|create|update|delete
+ttllm tokens list|show|create|delete
+ttllm secrets list|show|create|update|delete
+ttllm usage summary|costs [--user] [--model] [--since] [--until]
 ttllm audit-logs [--user] [--model] [--limit]
 ```
 
@@ -86,7 +89,7 @@ src/ttllm/
 ```
 
 ## Database
-11 tables: `users`, `llm_models`, `model_assignments`, `group_model_assignments`, `audit_logs`, `audit_log_bodies`, `groups`, `group_permissions`, `user_permissions`, `user_groups`, `gateway_tokens`, `refresh_tokens`
+12 tables: `users`, `llm_models`, `model_assignments`, `group_model_assignments`, `audit_logs`, `audit_log_bodies`, `groups`, `group_permissions`, `user_permissions`, `user_groups`, `gateway_tokens`, `refresh_tokens`, `secrets`
 - JWT-based auth with OIDC identity provider support (e.g. Entra ID)
 - RBAC via groups and direct user permission assignments
 - Gateway tokens are registered in DB for revocation; refresh tokens stored as SHA-256 hashes
