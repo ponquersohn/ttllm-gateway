@@ -6,10 +6,13 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
 
 from ttllm import __version__
 from ttllm.api.deps import AuthContext, DB, get_authenticated, require_permission
+from ttllm.config import settings
 from ttllm.core.permissions import Permissions
+from ttllm.core.secrets import validate_fernet_key
 from ttllm.schemas.admin import (
     AssignRequest,
     AuditLogBodyResponse,
@@ -23,6 +26,7 @@ from ttllm.schemas.admin import (
     SecretResponse,
     SecretUpdate,
     ServerStatusResponse,
+    StatusCheck,
     UsageSummaryResponse,
     UserCreate,
     UserResponse,
@@ -42,6 +46,7 @@ from ttllm.schemas.auth import (
 )
 from ttllm.schemas.common import PaginatedResponse
 from ttllm.services import audit_service, auth_service, group_service, model_service, secret_service, user_service
+from ttllm.api.me import _build_whoami
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -54,17 +59,8 @@ async def whoami(
     db: DB,
     ctx: AuthContext = Depends(get_authenticated),
 ):
-    """Return current user info, effective token permissions, and all available permissions."""
-    all_perms = await auth_service.resolve_user_permissions(db, ctx.user.id)
-    groups = await group_service.list_user_groups(db, ctx.user.id)
-    return WhoamiResponse(
-        id=ctx.user.id,
-        name=ctx.user.name,
-        email=ctx.user.email,
-        groups=[g.name for g in groups],
-        effective_permissions=sorted(ctx.permissions),
-        available_permissions=sorted(all_perms),
-    )
+    """Return current user info (alias for GET /me, kept for backward compatibility)."""
+    return await _build_whoami(db, ctx)
 
 
 # --- Status ---
@@ -72,10 +68,36 @@ async def whoami(
 
 @router.get("/status", response_model=ServerStatusResponse)
 async def server_status(
+    db: DB,
     ctx: AuthContext = Depends(require_permission(Permissions.SERVER_STATUS)),
 ):
-    """Return server version and status."""
-    return ServerStatusResponse(version=__version__, status="ok")
+    """Return server version, status, and configuration health checks."""
+    checks: list[StatusCheck] = []
+
+    # -- encryption_key check --
+    enc_key = settings.secrets.encryption_key
+    if not enc_key:
+        checks.append(StatusCheck(name="encryption_key", status="error", message="Encryption key is not set"))
+    elif not validate_fernet_key(enc_key):
+        checks.append(StatusCheck(name="encryption_key", status="error", message="Encryption key is not a valid Fernet key"))
+    else:
+        checks.append(StatusCheck(name="encryption_key", status="ok"))
+
+    # -- jwt_secret check --
+    if settings.auth.jwt.secret_key == "CHANGE-ME-IN-PRODUCTION":
+        checks.append(StatusCheck(name="jwt_secret", status="warning", message="JWT secret is using the default value"))
+    else:
+        checks.append(StatusCheck(name="jwt_secret", status="ok"))
+
+    # -- database check --
+    try:
+        await db.execute(text("SELECT 1"))
+        checks.append(StatusCheck(name="database", status="ok"))
+    except Exception as exc:
+        checks.append(StatusCheck(name="database", status="error", message=f"Database unreachable: {exc}"))
+
+    overall = "ok" if all(c.status == "ok" for c in checks) else "degraded"
+    return ServerStatusResponse(version=__version__, status=overall, checks=checks)
 
 
 # --- Helpers ---

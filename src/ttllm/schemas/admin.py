@@ -166,6 +166,13 @@ class SecretResponse(BaseModel):
 # --- Server ---
 
 
+class StatusCheck(BaseModel):
+    name: str
+    status: str  # "ok" | "warning" | "error"
+    message: str | None = None
+
+
 class ServerStatusResponse(BaseModel):
     version: str
-    status: str
+    status: str  # "ok" | "degraded"
+    checks: list[StatusCheck] = []

@@ -1,3 +1,3 @@
 """TTLLM Gateway - LLM Gateway with Anthropic-compatible API."""
 
-__version__ = "0.0.10"
+__version__ = "0.0.11"

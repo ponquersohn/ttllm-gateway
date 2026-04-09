@@ -35,6 +35,10 @@ secrets_app = typer.Typer(help="Manage secrets")
 usage_app = typer.Typer(help="View usage and costs")
 audit_app = typer.Typer(help="View audit logs")
 
+me_app = typer.Typer(help="Self-service: view your models and manage your tokens")
+me_tokens_app = typer.Typer(help="Manage your own tokens")
+me_app.add_typer(me_tokens_app, name="tokens")
+
 app.add_typer(users_app, name="users")
 app.add_typer(models_app, name="models")
 app.add_typer(groups_app, name="groups")
@@ -42,6 +46,7 @@ app.add_typer(tokens_app, name="tokens")
 app.add_typer(secrets_app, name="secrets")
 app.add_typer(usage_app, name="usage")
 app.add_typer(audit_app, name="audit-logs")
+app.add_typer(me_app, name="me")
 
 SESSION_DIR = Path.home() / ".config" / "ttllm"
 SESSION_FILE = SESSION_DIR / "session.json"
@@ -257,7 +262,7 @@ def whoami(
 ):
     """Show current user, groups, and permissions."""
     with _client() as client:
-        data = _handle_response(client.get("/admin/me"))
+        data = _handle_response(client.get("/me"))
 
     if as_json:
         _print_json(data)
@@ -283,14 +288,27 @@ def whoami(
 
 @app.command("status")
 def status(as_json: bool = JSON_OPTION):
-    """Show server version and status."""
+    """Show server version, status, and configuration health checks."""
     with _client() as client:
         data = _handle_response(client.get("/admin/status"))
     if as_json:
         _print_json(data)
         return
     console.print(f"[bold]Version:[/bold] {data['version']}")
-    console.print(f"[bold]Status:[/bold]  {data['status']}")
+    overall = data["status"]
+    overall_style = "green" if overall == "ok" else "yellow"
+    console.print(f"[bold]Status:[/bold]  [{overall_style}]{overall}[/{overall_style}]")
+
+    checks = data.get("checks", [])
+    if checks:
+        console.print()
+        for check in checks:
+            color = {"ok": "green", "warning": "yellow", "error": "red"}.get(check["status"], "white")
+            label = f"[{color}]{check['status']}[/{color}]"
+            line = f"  {check['name']}: {label}"
+            if check.get("message"):
+                line += f" — {check['message']}"
+            console.print(line)
 
 
 # --- Users ---
@@ -1256,6 +1274,107 @@ def audit_logs_list(
         )
     console.print(table)
     console.print(f"Total: {data['total']}")
+
+
+# --- Me (self-service) ---
+
+
+@me_app.command("models")
+def me_models(
+    as_json: bool = JSON_OPTION,
+):
+    """List models available to you (direct + group assignments)."""
+    with _client() as client:
+        data = _handle_response(client.get("/me/models"))
+
+    if as_json:
+        _print_json(data)
+        return
+
+    if not data:
+        console.print("[yellow]No models available.[/yellow]")
+        return
+
+    table = Table(title="My Models")
+    table.add_column("Name")
+    table.add_column("Provider")
+
+    for m in data:
+        table.add_row(m["name"], m["provider"])
+    console.print(table)
+
+
+@me_tokens_app.command("list")
+@me_tokens_app.callback(invoke_without_command=True)
+def me_tokens_list(
+    as_json: bool = JSON_OPTION,
+):
+    """List your active tokens."""
+    with _client() as client:
+        data = _handle_response(client.get("/me/tokens"))
+
+    if as_json:
+        _print_json(data)
+        return
+
+    if not data:
+        console.print("[yellow]No tokens found.[/yellow]")
+        return
+
+    table = Table(title="My Tokens")
+    table.add_column("ID", style="dim")
+    table.add_column("Label")
+    table.add_column("Permissions")
+    table.add_column("Active")
+    table.add_column("Expires")
+
+    for t in data:
+        table.add_row(
+            t["id"][:8] + "...",
+            t.get("label") or "-",
+            ", ".join(t.get("permissions", [])) or "-",
+            "Yes" if t["is_active"] else "No",
+            (t.get("expires_at") or "never")[:10],
+        )
+    console.print(table)
+
+
+@me_tokens_app.command("create")
+def me_tokens_create(
+    label: Optional[str] = typer.Option(None, "--label", help="Token label"),
+    ttl_days: Optional[int] = typer.Option(None, "--ttl-days", help="Token lifetime in days"),
+    permissions: Optional[str] = typer.Option(None, "--permissions", help="Comma-separated permissions (default: llm.invoke)"),
+):
+    """Create a token for yourself."""
+    body: dict = {}
+    if label:
+        body["label"] = label
+    if ttl_days is not None:
+        body["ttl_days"] = ttl_days
+    if permissions:
+        body["permissions"] = [s.strip() for s in permissions.split(",") if s.strip()]
+    with _client() as client:
+        data = _handle_response(client.post("/me/tokens", json=body))
+    console.print("[green]Token created:[/green]")
+    console.print(f"  Token: [bold]{data['access_token']}[/bold]")
+    console.print(f"  ID: {data['id']}")
+    console.print(f"  Permissions: {', '.join(data.get('permissions', []))}")
+    console.print(f"  Label: {data.get('label') or 'N/A'}")
+    console.print(f"  Expires: {data.get('expires_at') or 'never'}")
+    console.print("[yellow]Save this token now -- it will not be shown again.[/yellow]")
+
+
+@me_tokens_app.command("delete")
+def me_tokens_delete(
+    token_id: str = typer.Argument(help="Token ID to revoke"),
+):
+    """Revoke one of your own tokens."""
+    with _client() as client:
+        resp = client.delete(f"/me/tokens/{token_id}")
+        if resp.status_code == 204:
+            console.print("[green]Token revoked.[/green]")
+        else:
+            _handle_response(resp)
 
 
 # --- Chat ---

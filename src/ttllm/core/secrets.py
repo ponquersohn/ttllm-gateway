@@ -10,6 +10,15 @@ from typing import Any, Callable
 from cryptography.fernet import Fernet
 
 
+def validate_fernet_key(key: str) -> bool:
+    """Return True if *key* is a valid Fernet key, False otherwise."""
+    try:
+        Fernet(key.encode() if isinstance(key, str) else key)
+        return True
+    except (ValueError, Exception):
+        return False
+
+
 def encrypt_value(plaintext: str, key: str) -> str:
     """Encrypt a plaintext string using Fernet. Returns base64-encoded ciphertext."""
     f = Fernet(key.encode() if isinstance(key, str) else key)

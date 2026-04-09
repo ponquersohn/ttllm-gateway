@@ -178,7 +178,12 @@ At runtime, `secret://` references are resolved transparently before the provide
 Admin operations via the `ttllm` CLI:
 
 ```bash
-ttllm status                         # Show server version and status
+ttllm status                         # Show server version, status, and config checks
+ttllm whoami                         # Show current user, groups, and permissions
+ttllm me models                      # List models available to you
+ttllm me tokens                      # List your active tokens
+ttllm me tokens create               # Create a token for yourself
+ttllm me tokens delete <id>          # Revoke one of your tokens
 ttllm users list|show|create|update|delete
 ttllm models list|show|create|update|delete|assign|unassign
 ttllm groups list|show|create|update|delete
@@ -187,6 +192,33 @@ ttllm secrets list|show|create|update|delete
 ttllm usage summary|costs [--user] [--model] [--since] [--until]
 ttllm audit-logs [--user] [--model] [--limit]
 ```
+
+### Self-Service Endpoints
+
+Any authenticated user (including gateway-only users) can access the `/me` endpoints to discover their available models and manage their own tokens:
+
+| Endpoint | Description |
+|---|---|
+| `GET /me` | Current user info, groups, and permissions |
+| `GET /me/models` | Models assigned to you (direct + group) |
+| `GET /me/tokens` | Your active tokens |
+| `POST /me/tokens` | Create a token scoped to your permissions |
+| `DELETE /me/tokens/{id}` | Revoke one of your tokens |
+
+### Status Checks
+
+`ttllm status` (and `GET /admin/status`) runs health checks against the current configuration and reports their results:
+
+| Check | Condition | Status |
+|---|---|---|
+| `encryption_key` | Valid Fernet key configured | `ok` |
+| `encryption_key` | Empty or invalid | `error` |
+| `jwt_secret` | Custom value | `ok` |
+| `jwt_secret` | Still using `CHANGE-ME-IN-PRODUCTION` | `warning` |
+| `database` | `SELECT 1` succeeds | `ok` |
+| `database` | Connection fails | `error` |
+
+The overall status is `ok` when all checks pass, or `degraded` when any check returns `warning` or `error`.
 
 ## Releasing
 
