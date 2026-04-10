@@ -20,6 +20,15 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _oidc_state_store: dict[str, dict] = {}
 
 
+@router.get("/identity-providers")
+async def list_identity_providers():
+    """Return configured identity providers (public, no auth required)."""
+    return [
+        {"slug": slug, "name": idp.name, "type": idp.type}
+        for slug, idp in settings.auth.identity_providers.items()
+    ]
+
+
 @router.post("/token", response_model=LoginTokenResponse)
 async def login(body: LoginRequest, db: DB):
     """Authenticate with email + password, receive management JWT + refresh token."""

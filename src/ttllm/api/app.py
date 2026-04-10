@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.staticfiles import StaticFiles
 
 from ttllm import __version__
 from ttllm.config import settings
@@ -77,5 +80,10 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    # Mount self-service UI (static files)
+    ui_dir = Path(__file__).resolve().parent.parent / "ui"
+    if ui_dir.is_dir():
+        app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app

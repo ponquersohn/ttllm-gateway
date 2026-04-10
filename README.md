@@ -236,6 +236,26 @@ After running `make release*`, follow the printed instructions to commit, tag, p
 2. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/)
 3. **Build and push** the Docker image to `ghcr.io/ponquersohn/ttllm-gateway`
 
+## Self-Service Web UI
+
+A browser-based UI is available at `/ui` for self-service tasks without needing the CLI or raw API calls.
+
+### Features
+
+- **Login** with email/password or SSO (configured identity providers are detected automatically)
+- **View models** assigned to your account
+- **Manage tokens** — create new API tokens and revoke existing ones
+
+### Access
+
+Navigate to `http://localhost:8000/ui` (or your deployed base URL + `/ui`). The UI uses only `/me/` endpoints — no admin access is exposed.
+
+Authentication state is stored in `sessionStorage`, so it is scoped to the browser tab and cleared when the tab is closed.
+
+### Public API
+
+The endpoint `GET /auth/identity-providers` returns the list of configured identity providers (slug, name, type) without requiring authentication. This is used by the UI to render SSO buttons.
+
 ## User Guide
 
 For end-user documentation covering login, token creation, API usage, SDK integration, and Claude Code setup, see [docs/user-guide.md](docs/user-guide.md).

@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TTLLM Gateway</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f8f9fa;--surface:#fff;--border:#dee2e6;--text:#212529;--text-secondary:#6c757d;
+  --accent:#2563eb;--accent-hover:#1d4ed8;--danger:#dc2626;--danger-hover:#b91c1c;
+  --success:#16a34a;--radius:6px;--shadow:0 1px 3px rgba(0,0,0,.1);
+}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;min-height:100vh}
+a{color:var(--accent);text-decoration:none}
+
+/* Header */
+.header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
+.header h1{font-size:18px;font-weight:700;letter-spacing:-.5px}
+.header-right{display:flex;align-items:center;gap:12px;font-size:14px;color:var(--text-secondary)}
+.header-right button{background:none;border:1px solid var(--border);border-radius:var(--radius);padding:4px 12px;cursor:pointer;font-size:13px;color:var(--text-secondary)}
+.header-right button:hover{background:var(--bg);color:var(--text)}
+
+/* Layout */
+.container{max-width:900px;margin:0 auto;padding:24px 16px}
+
+/* Login */
+.login-wrapper{display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 57px)}
+.login-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:32px;width:100%;max-width:400px;box-shadow:var(--shadow)}
+.login-card h2{font-size:20px;margin-bottom:4px}
+.login-card p{color:var(--text-secondary);font-size:14px;margin-bottom:24px}
+
+/* Forms */
+label{display:block;font-size:13px;font-weight:500;margin-bottom:4px;color:var(--text-secondary)}
+input[type="text"],input[type="email"],input[type="password"],input[type="number"]{
+  width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:14px;
+  background:var(--surface);color:var(--text);outline:none;transition:border-color .15s
+}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.form-group{margin-bottom:16px}
+.form-row{display:flex;gap:12px}
+.form-row .form-group{flex:1}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:8px 16px;border-radius:var(--radius);font-size:14px;font-weight:500;cursor:pointer;border:1px solid transparent;transition:background .15s,border-color .15s}
+.btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-primary:disabled{opacity:.6;cursor:not-allowed}
+.btn-danger{background:var(--danger);color:#fff;border-color:var(--danger);padding:4px 10px;font-size:13px}
+.btn-danger:hover{background:var(--danger-hover)}
+.btn-secondary{background:var(--surface);color:var(--text);border-color:var(--border)}
+.btn-secondary:hover{background:var(--bg)}
+.btn-sso{width:100%;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);font-size:14px;cursor:pointer;font-weight:500;transition:background .15s}
+.btn-sso:hover{background:var(--bg)}
+.btn-copy{background:none;border:1px solid var(--border);border-radius:var(--radius);padding:4px 8px;cursor:pointer;font-size:12px;color:var(--text-secondary)}
+.btn-copy:hover{background:var(--bg)}
+.btn-block{width:100%}
+
+/* Divider */
+.divider{display:flex;align-items:center;gap:12px;margin:20px 0;color:var(--text-secondary);font-size:13px}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--border)}
+
+/* Tabs */
+.tabs{display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:24px}
+.tab{padding:8px 20px;font-size:14px;font-weight:500;cursor:pointer;border:none;background:none;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+/* Tables */
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;padding:10px 12px;border-bottom:2px solid var(--border);font-weight:600;font-size:13px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px}
+td{padding:10px 12px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(0,0,0,.015)}
+.no-data{text-align:center;padding:32px;color:var(--text-secondary)}
+
+/* Cards / Panels */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:20px;box-shadow:var(--shadow)}
+.panel-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.panel-header h3{font-size:16px}
+
+/* Toast */
+.toast-container{position:fixed;top:16px;right:16px;z-index:1000;display:flex;flex-direction:column;gap:8px}
+.toast{padding:12px 16px;border-radius:var(--radius);font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:slideIn .2s ease-out;max-width:400px;word-break:break-word}
+.toast-success{background:#065f46;color:#fff}
+.toast-error{background:#991b1b;color:#fff}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+
+/* Token reveal */
+.token-reveal{background:#fef3c7;border:1px solid #f59e0b;border-radius:var(--radius);padding:12px;margin-top:12px;font-size:13px}
+.token-reveal code{display:block;background:#fff;padding:8px;border-radius:4px;margin:8px 0;word-break:break-all;font-family:monospace;font-size:12px}
+.token-reveal .warning{color:#92400e;font-weight:500;font-size:12px;margin-top:4px}
+
+/* Spinner */
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading{display:flex;align-items:center;justify-content:center;gap:8px;padding:32px;color:var(--text-secondary);font-size:14px}
+
+/* Responsive */
+@media(max-width:600px){
+  .container{padding:16px 12px}
+  .login-card{padding:24px 20px}
+  .form-row{flex-direction:column;gap:0}
+  .header{padding:12px 16px}
+  td,th{padding:8px 6px;font-size:13px}
+}
+
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>TTLLM</h1>
+  <div class="header-right" id="header-right"></div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<!-- Login View -->
+<div id="login-view" class="login-wrapper hidden">
+  <div class="login-card">
+    <h2>Sign in</h2>
+    <p>Access your models and manage tokens</p>
+    <div id="sso-buttons"></div>
+    <form id="login-form">
+      <div class="form-group">
+        <label for="login-email">Email</label>
+        <input type="email" id="login-email" required autocomplete="email">
+      </div>
+      <div class="form-group">
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" required autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn btn-primary btn-block" id="login-btn">Sign in</button>
+    </form>
+  </div>
+</div>
+
+<!-- Dashboard View -->
+<div id="dashboard-view" class="container hidden">
+  <div class="tabs">
+    <button class="tab active" data-tab="tokens">Tokens</button>
+    <button class="tab" data-tab="models">Models</button>
+  </div>
+
+  <!-- Tokens Tab -->
+  <div id="tab-tokens">
+    <div class="panel">
+      <div class="panel-header">
+        <h3>Create Token</h3>
+      </div>
+      <form id="create-token-form">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="token-label">Label</label>
+            <input type="text" id="token-label" placeholder="e.g. my-script">
+          </div>
+          <div class="form-group">
+            <label for="token-ttl">TTL (days)</label>
+            <input type="number" id="token-ttl" placeholder="30" min="1">
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary" id="create-token-btn">Create token</button>
+      </form>
+      <div id="token-created" class="token-reveal hidden"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3>Your Tokens</h3>
+      </div>
+      <div id="tokens-table-wrapper">
+        <div class="loading"><span class="spinner"></span> Loading tokens...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Models Tab -->
+  <div id="tab-models" class="hidden">
+    <div class="panel">
+      <div class="panel-header">
+        <h3>Available Models</h3>
+      </div>
+      <div id="models-table-wrapper">
+        <div class="loading"><span class="spinner"></span> Loading models...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  "use strict";
+
+  // --- State ---
+  let accessToken = null;
+  let refreshToken = null;
+  let currentUser = null;
+
+  // --- DOM refs ---
+  const $ = (sel) => document.querySelector(sel);
+  const loginView = $("#login-view");
+  const dashboardView = $("#dashboard-view");
+  const headerRight = $("#header-right");
+  const toastContainer = $("#toast-container");
+  const ssoButtons = $("#sso-buttons");
+  const loginForm = $("#login-form");
+  const createTokenForm = $("#create-token-form");
+  const tokenCreated = $("#token-created");
+  const tokensWrapper = $("#tokens-table-wrapper");
+  const modelsWrapper = $("#models-table-wrapper");
+
+  // --- Toast ---
+  function toast(message, type) {
+    const el = document.createElement("div");
+    el.className = "toast toast-" + type;
+    el.textContent = message;
+    toastContainer.appendChild(el);
+    setTimeout(() => { el.remove(); }, 4000);
+  }
+
+  // --- Auth helpers ---
+  function storeTokens(access, refresh) {
+    accessToken = access;
+    refreshToken = refresh;
+    sessionStorage.setItem("access_token", access);
+    if (refresh) sessionStorage.setItem("refresh_token", refresh);
+  }
+
+  function clearTokens() {
+    accessToken = null;
+    refreshToken = null;
+    currentUser = null;
+    sessionStorage.removeItem("access_token");
+    sessionStorage.removeItem("refresh_token");
+  }
+
+  async function apiFetch(path, options) {
+    options = options || {};
+    options.headers = options.headers || {};
+    if (accessToken) {
+      options.headers["Authorization"] = "Bearer " + accessToken;
+    }
+    if (options.body && typeof options.body === "object" && !(options.body instanceof FormData)) {
+      options.headers["Content-Type"] = "application/json";
+      options.body = JSON.stringify(options.body);
+    }
+
+    let resp = await fetch(path, options);
+
+    // Try refresh on 401
+    if (resp.status === 401 && refreshToken) {
+      const refreshResp = await fetch("/auth/token/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (refreshResp.ok) {
+        const data = await refreshResp.json();
+        storeTokens(data.access_token, data.refresh_token || refreshToken);
+        options.headers["Authorization"] = "Bearer " + accessToken;
+        resp = await fetch(path, options);
+      } else {
+        doLogout();
+        return null;
+      }
+    }
+
+    if (resp.status === 401) {
+      doLogout();
+      return null;
+    }
+
+    return resp;
+  }
+
+  // --- Views ---
+  function showLogin() {
+    loginView.classList.remove("hidden");
+    dashboardView.classList.add("hidden");
+    headerRight.innerHTML = "";
+  }
+
+  function showDashboard() {
+    loginView.classList.add("hidden");
+    dashboardView.classList.remove("hidden");
+    const email = currentUser ? currentUser.email : "";
+    headerRight.innerHTML =
+      '<span>' + escapeHtml(email) + '</span>' +
+      '<button id="logout-btn">Sign out</button>';
+    $("#logout-btn").addEventListener("click", doLogout);
+    loadTokens();
+    loadModels();
+  }
+
+  // --- Login ---
+  async function doLocalLogin(email, password) {
+    const resp = await fetch("/auth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, password: password }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => null);
+      throw new Error((err && err.error && err.error.message) || "Login failed");
+    }
+    const data = await resp.json();
+    storeTokens(data.access_token, data.refresh_token);
+    await loadUser();
+    showDashboard();
+  }
+
+  async function doLogout() {
+    if (refreshToken) {
+      try {
+        await fetch("/auth/logout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + accessToken,
+          },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+      } catch (_) { /* best effort */ }
+    }
+    clearTokens();
+    showLogin();
+  }
+
+  loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("#login-btn");
+    btn.disabled = true;
+    btn.textContent = "Signing in...";
+    try {
+      await doLocalLogin($("#login-email").value, $("#login-password").value);
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Sign in";
+    }
+  });
+
+  // --- SSO ---
+  async function loadIdPs() {
+    try {
+      const resp = await fetch("/auth/identity-providers");
+      if (!resp.ok) return;
+      const idps = await resp.json();
+      if (idps.length === 0) return;
+
+      let html = '';
+      idps.forEach(function(idp) {
+        html += '<button class="btn-sso" data-slug="' + escapeAttr(idp.slug) + '">' +
+          'Sign in with ' + escapeHtml(idp.name) + '</button>';
+      });
+      html += '<div class="divider">or sign in with email</div>';
+      ssoButtons.innerHTML = html;
+
+      ssoButtons.querySelectorAll(".btn-sso").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          const slug = this.getAttribute("data-slug");
+          const redirect = window.location.origin + "/ui";
+          window.location = "/auth/sso/" + encodeURIComponent(slug) + "/authorize?final_redirect=" + encodeURIComponent(redirect);
+        });
+      });
+    } catch (_) { /* ignore */ }
+  }
+
+  // --- User ---
+  async function loadUser() {
+    const resp = await apiFetch("/me");
+    if (!resp || !resp.ok) return;
+    currentUser = await resp.json();
+  }
+
+  // --- Tokens ---
+  async function loadTokens() {
+    tokensWrapper.innerHTML = '<div class="loading"><span class="spinner"></span> Loading tokens...</div>';
+    const resp = await apiFetch("/me/tokens");
+    if (!resp) return;
+    if (!resp.ok) {
+      tokensWrapper.innerHTML = '<div class="no-data">Failed to load tokens</div>';
+      return;
+    }
+    const tokens = await resp.json();
+    if (tokens.length === 0) {
+      tokensWrapper.innerHTML = '<div class="no-data">No tokens yet. Create one above.</div>';
+      return;
+    }
+    let html = '<table><thead><tr><th>Label</th><th>Permissions</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody>';
+    tokens.forEach(function(t) {
+      html += '<tr>' +
+        '<td>' + escapeHtml(t.label || "(no label)") + '</td>' +
+        '<td>' + escapeHtml(t.permissions.join(", ")) + '</td>' +
+        '<td>' + formatDate(t.created_at) + '</td>' +
+        '<td>' + (t.expires_at ? formatDate(t.expires_at) : "never") + '</td>' +
+        '<td><button class="btn btn-danger" data-revoke="' + t.id + '">Revoke</button></td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    tokensWrapper.innerHTML = html;
+
+    tokensWrapper.querySelectorAll("[data-revoke]").forEach(function(btn) {
+      btn.addEventListener("click", async function() {
+        const id = this.getAttribute("data-revoke");
+        this.disabled = true;
+        this.textContent = "...";
+        const resp = await apiFetch("/me/tokens/" + id, { method: "DELETE" });
+        if (resp && (resp.status === 204 || resp.ok)) {
+          toast("Token revoked", "success");
+          loadTokens();
+        } else {
+          toast("Failed to revoke token", "error");
+          this.disabled = false;
+          this.textContent = "Revoke";
+        }
+      });
+    });
+  }
+
+  createTokenForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("#create-token-btn");
+    btn.disabled = true;
+    btn.textContent = "Creating...";
+    tokenCreated.classList.add("hidden");
+
+    const body = {};
+    const label = $("#token-label").value.trim();
+    const ttl = $("#token-ttl").value.trim();
+    if (label) body.label = label;
+    if (ttl) body.ttl_days = parseInt(ttl, 10);
+
+    try {
+      const resp = await apiFetch("/me/tokens", { method: "POST", body: body });
+      if (!resp) return;
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => null);
+        throw new Error((err && err.error && err.error.message) || "Failed to create token");
+      }
+      const data = await resp.json();
+      tokenCreated.innerHTML =
+        '<strong>Token created!</strong>' +
+        '<code id="token-value">' + escapeHtml(data.access_token) + '</code>' +
+        '<button class="btn-copy" id="copy-token-btn">Copy to clipboard</button>' +
+        '<div class="warning">Save this token now. It will not be shown again.</div>';
+      tokenCreated.classList.remove("hidden");
+
+      $("#copy-token-btn").addEventListener("click", function() {
+        navigator.clipboard.writeText(data.access_token).then(function() {
+          toast("Copied to clipboard", "success");
+        }).catch(function() {
+          toast("Copy failed — select and copy manually", "error");
+        });
+      });
+
+      $("#token-label").value = "";
+      $("#token-ttl").value = "";
+      loadTokens();
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Create token";
+    }
+  });
+
+  // --- Models ---
+  async function loadModels() {
+    modelsWrapper.innerHTML = '<div class="loading"><span class="spinner"></span> Loading models...</div>';
+    const resp = await apiFetch("/me/models");
+    if (!resp) return;
+    if (!resp.ok) {
+      modelsWrapper.innerHTML = '<div class="no-data">Failed to load models</div>';
+      return;
+    }
+    const models = await resp.json();
+    if (models.length === 0) {
+      modelsWrapper.innerHTML = '<div class="no-data">No models assigned to your account.</div>';
+      return;
+    }
+    let html = '<table><thead><tr><th>Name</th><th>Provider</th></tr></thead><tbody>';
+    models.forEach(function(m) {
+      html += '<tr><td>' + escapeHtml(m.name) + '</td><td>' + escapeHtml(m.provider) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    modelsWrapper.innerHTML = html;
+  }
+
+  // --- Tabs ---
+  document.querySelectorAll(".tab").forEach(function(tab) {
+    tab.addEventListener("click", function() {
+      document.querySelectorAll(".tab").forEach(function(t) { t.classList.remove("active"); });
+      this.classList.add("active");
+      const target = this.getAttribute("data-tab");
+      $("#tab-tokens").classList.toggle("hidden", target !== "tokens");
+      $("#tab-models").classList.toggle("hidden", target !== "models");
+    });
+  });
+
+  // --- Helpers ---
+  function escapeHtml(str) {
+    var div = document.createElement("div");
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+  }
+
+  function escapeAttr(str) {
+    return str.replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  function formatDate(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // --- Init ---
+  async function init() {
+    // Check for SSO callback tokens in URL
+    var params = new URLSearchParams(window.location.search);
+    if (params.has("access_token")) {
+      storeTokens(params.get("access_token"), params.get("refresh_token") || null);
+      history.replaceState(null, "", window.location.pathname);
+    } else {
+      accessToken = sessionStorage.getItem("access_token");
+      refreshToken = sessionStorage.getItem("refresh_token");
+    }
+
+    await loadIdPs();
+
+    if (accessToken) {
+      await loadUser();
+      if (currentUser) {
+        showDashboard();
+      } else {
+        clearTokens();
+        showLogin();
+      }
+    } else {
+      showLogin();
+    }
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
