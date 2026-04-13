@@ -301,13 +301,47 @@ If that works you can probably set the settings in `.claude/settings.local.yaml`
 
 ## 9. View Usage and Costs
 
-### Usage summary
+### Web UI
+
+Navigate to `/ui` in your browser and sign in. The **Usage** tab shows:
+
+- **Summary cards** — total requests, input tokens, output tokens, and average latency
+- **Cost breakdown table** — per-model request counts, token counts, and cost
+- **Date range filter** — pick custom dates or use the quick presets (Last 7 days, Last 30 days, All time)
+
+### Self-service API
+
+You can query your own usage programmatically without admin permissions:
 
 ```bash
-ttllm usage summary --since 2026-01-01
+# Usage summary
+curl -H "Authorization: Bearer $TOKEN" \
+  https://gateway.example.com/me/usage?since=2026-04-01T00:00:00Z
+
+# Per-model cost breakdown
+curl -H "Authorization: Bearer $TOKEN" \
+  https://gateway.example.com/me/usage/costs?since=2026-04-01T00:00:00Z
 ```
 
-### Cost breakdown by model
+Both endpoints accept optional `since` and `until` query parameters (ISO 8601 datetime).
+
+### CLI (self-service)
+
+```bash
+ttllm me usage                        # Your usage summary
+ttllm me usage --since 2026-04-01     # With date filter
+ttllm me usage costs                  # Your cost breakdown by model
+ttllm me usage costs --json           # Machine-readable output
+```
+
+### CLI (admin — requires usage.view permission)
+
+```bash
+ttllm usage summary --since 2026-01-01        # All users
+ttllm usage summary --user <ID>                # Specific user
+```
+
+### Cost breakdown by model (admin)
 
 ```bash
 ttllm usage costs --since 2026-04-01

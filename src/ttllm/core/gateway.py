@@ -98,10 +98,12 @@ async def stream(
 
     collector = StreamCollector(llm_model=llm_model)
     lc_stream = chat_model.astream(messages)
+    token_usage: dict[str, int] = {}
 
     sse_stream = _tracked_stream(
-        format_sse_stream(lc_stream, llm_model.name, request_id),
+        format_sse_stream(lc_stream, llm_model.name, request_id, token_usage),
         collector,
+        token_usage,
     )
 
     return sse_stream, collector
@@ -136,8 +138,11 @@ class StreamCollector:
 async def _tracked_stream(
     sse_stream: AsyncIterator[str],
     collector: StreamCollector,
+    token_usage: dict[str, int],
 ) -> AsyncIterator[str]:
-    """Wrap SSE stream to finalize the collector when done."""
+    """Wrap SSE stream and pass collected token counts to the collector."""
     async for event in sse_stream:
         yield event
-    collector.finalize()
+    # Store token counts on collector so the API layer can finalize
+    collector.input_tokens = token_usage.get("input_tokens", 0)
+    collector.output_tokens = token_usage.get("output_tokens", 0)

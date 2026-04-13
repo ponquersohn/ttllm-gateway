@@ -17,6 +17,7 @@ async def format_sse_stream(
     langchain_stream: AsyncIterator,
     model_name: str,
     request_id: uuid.UUID,
+    token_usage: dict[str, int] | None = None,
 ) -> AsyncIterator[str]:
     """Convert a LangChain astream into Anthropic SSE events.
 
@@ -75,6 +76,11 @@ async def format_sse_stream(
             output_tokens = usage_meta.get("output_tokens", output_tokens)
 
         chunk_index += 1
+
+    # Store final token counts for the caller
+    if token_usage is not None:
+        token_usage["input_tokens"] = input_tokens
+        token_usage["output_tokens"] = output_tokens
 
     # content_block_stop
     yield _sse_event("content_block_stop", {

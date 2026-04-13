@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ttllm.api.deps import AuthContext, DB, get_authenticated
-from ttllm.schemas.admin import WhoamiResponse
+from ttllm.schemas.admin import CostBreakdownItem, UsageSummaryResponse, WhoamiResponse
 from ttllm.schemas.auth import TokenCreatedResponse, TokenResponse
 from ttllm.schemas.me import AvailableModelResponse, SelfTokenCreate
-from ttllm.services import auth_service, group_service, model_service
+from ttllm.services import auth_service, group_service, model_service, usage_service
 
 router = APIRouter(tags=["me"])
 
@@ -95,3 +96,30 @@ async def revoke_my_token(
     revoked = await auth_service.revoke_token(db, token_id)
     if not revoked:
         raise HTTPException(404, detail={"type": "not_found", "message": "Token not found"})
+
+
+@router.get("/me/usage", response_model=UsageSummaryResponse)
+async def get_my_usage(
+    db: DB,
+    ctx: AuthContext = Depends(get_authenticated),
+    since: datetime | None = None,
+    until: datetime | None = None,
+):
+    """Return usage summary for the authenticated user."""
+    summary = await usage_service.get_usage_summary(
+        db, user_id=ctx.user.id, since=since, until=until
+    )
+    return UsageSummaryResponse(**summary)
+
+
+@router.get("/me/usage/costs", response_model=list[CostBreakdownItem])
+async def get_my_costs(
+    db: DB,
+    ctx: AuthContext = Depends(get_authenticated),
+    since: datetime | None = None,
+    until: datetime | None = None,
+):
+    """Return per-model cost breakdown for the authenticated user."""
+    return await usage_service.get_cost_breakdown(
+        db, user_id=ctx.user.id, since=since, until=until
+    )

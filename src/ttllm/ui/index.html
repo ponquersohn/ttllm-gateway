@@ -95,6 +95,19 @@ tr:hover td{background:rgba(0,0,0,.015)}
 @keyframes spin{to{transform:rotate(360deg)}}
 .loading{display:flex;align-items:center;justify-content:center;gap:8px;padding:32px;color:var(--text-secondary);font-size:14px}
 
+/* Stat cards */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;text-align:center}
+.stat-card .stat-value{font-size:24px;font-weight:700;color:var(--text);line-height:1.2}
+.stat-card .stat-label{font-size:12px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+
+/* Date filter bar */
+.filter-bar{display:flex;align-items:flex-end;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.filter-bar .form-group{margin-bottom:0}
+.filter-bar input[type="date"]{width:auto;padding:6px 10px;font-size:13px}
+.preset-btn{background:none;border:1px solid var(--border);border-radius:var(--radius);padding:4px 10px;cursor:pointer;font-size:12px;color:var(--text-secondary)}
+.preset-btn:hover,.preset-btn.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+
 /* Responsive */
 @media(max-width:600px){
   .container{padding:16px 12px}
@@ -141,6 +154,7 @@ tr:hover td{background:rgba(0,0,0,.015)}
   <div class="tabs">
     <button class="tab active" data-tab="tokens">Tokens</button>
     <button class="tab" data-tab="models">Models</button>
+    <button class="tab" data-tab="usage">Usage</button>
   </div>
 
   <!-- Tokens Tab -->
@@ -182,6 +196,34 @@ tr:hover td{background:rgba(0,0,0,.015)}
       </div>
       <div id="models-table-wrapper">
         <div class="loading"><span class="spinner"></span> Loading models...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Usage Tab -->
+  <div id="tab-usage" class="hidden">
+    <div class="filter-bar">
+      <div class="form-group">
+        <label for="usage-since">Since</label>
+        <input type="date" id="usage-since">
+      </div>
+      <div class="form-group">
+        <label for="usage-until">Until</label>
+        <input type="date" id="usage-until">
+      </div>
+      <button class="preset-btn" data-preset="7">Last 7 days</button>
+      <button class="preset-btn" data-preset="30">Last 30 days</button>
+      <button class="preset-btn" data-preset="all">All time</button>
+    </div>
+    <div id="usage-summary" class="stat-grid">
+      <div class="loading" style="grid-column:1/-1"><span class="spinner"></span> Loading usage...</div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3>Cost Breakdown</h3>
+      </div>
+      <div id="costs-table-wrapper">
+        <div class="loading"><span class="spinner"></span> Loading costs...</div>
       </div>
     </div>
   </div>
@@ -488,6 +530,86 @@ tr:hover td{background:rgba(0,0,0,.015)}
     modelsWrapper.innerHTML = html;
   }
 
+  // --- Usage ---
+  const usageSummaryEl = $("#usage-summary");
+  const costsWrapper = $("#costs-table-wrapper");
+  let usageLoaded = false;
+
+  async function loadUsage() {
+    const sinceVal = $("#usage-since").value;
+    const untilVal = $("#usage-until").value;
+    const params = new URLSearchParams();
+    if (sinceVal) params.set("since", new Date(sinceVal).toISOString());
+    if (untilVal) {
+      const d = new Date(untilVal);
+      d.setHours(23, 59, 59, 999);
+      params.set("until", d.toISOString());
+    }
+    const qs = params.toString();
+    const suffix = qs ? "?" + qs : "";
+
+    usageSummaryEl.innerHTML = '<div class="loading" style="grid-column:1/-1"><span class="spinner"></span> Loading usage...</div>';
+    costsWrapper.innerHTML = '<div class="loading"><span class="spinner"></span> Loading costs...</div>';
+
+    const resp = await apiFetch("/me/usage" + suffix);
+    if (!resp || !resp.ok) {
+      usageSummaryEl.innerHTML = '<div class="no-data" style="grid-column:1/-1">Failed to load usage</div>';
+    } else {
+      const s = await resp.json();
+      usageSummaryEl.innerHTML =
+        '<div class="stat-card"><div class="stat-value">' + s.total_requests.toLocaleString() + '</div><div class="stat-label">Requests</div></div>' +
+        '<div class="stat-card"><div class="stat-value">' + s.total_input_tokens.toLocaleString() + '</div><div class="stat-label">Input Tokens</div></div>' +
+        '<div class="stat-card"><div class="stat-value">' + s.total_output_tokens.toLocaleString() + '</div><div class="stat-label">Output Tokens</div></div>' +
+        '<div class="stat-card"><div class="stat-value">' + s.avg_latency_ms.toLocaleString(undefined, {maximumFractionDigits: 1}) + ' ms</div><div class="stat-label">Avg Latency</div></div>';
+    }
+
+    const costResp = await apiFetch("/me/usage/costs" + suffix);
+    if (!costResp || !costResp.ok) {
+      costsWrapper.innerHTML = '<div class="no-data">Failed to load costs</div>';
+    } else {
+      const costs = await costResp.json();
+      if (costs.length === 0) {
+        costsWrapper.innerHTML = '<div class="no-data">No usage data for this period.</div>';
+      } else {
+        let html = '<table><thead><tr><th>Model</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Cost</th></tr></thead><tbody>';
+        costs.forEach(function(c) {
+          html += '<tr>' +
+            '<td>' + escapeHtml(c.model_name) + '</td>' +
+            '<td>' + c.request_count.toLocaleString() + '</td>' +
+            '<td>' + c.input_tokens.toLocaleString() + '</td>' +
+            '<td>' + c.output_tokens.toLocaleString() + '</td>' +
+            '<td>$' + escapeHtml(c.total_cost) + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table>';
+        costsWrapper.innerHTML = html;
+      }
+    }
+  }
+
+  $("#usage-since").addEventListener("change", function() { loadUsage(); });
+  $("#usage-until").addEventListener("change", function() { loadUsage(); });
+
+  document.querySelectorAll(".preset-btn").forEach(function(btn) {
+    btn.addEventListener("click", function() {
+      document.querySelectorAll(".preset-btn").forEach(function(b) { b.classList.remove("active"); });
+      this.classList.add("active");
+      const preset = this.getAttribute("data-preset");
+      if (preset === "all") {
+        $("#usage-since").value = "";
+        $("#usage-until").value = "";
+      } else {
+        const days = parseInt(preset, 10);
+        const now = new Date();
+        const since = new Date(now);
+        since.setDate(since.getDate() - days);
+        $("#usage-since").value = since.toISOString().slice(0, 10);
+        $("#usage-until").value = now.toISOString().slice(0, 10);
+      }
+      loadUsage();
+    });
+  });
+
   // --- Tabs ---
   document.querySelectorAll(".tab").forEach(function(tab) {
     tab.addEventListener("click", function() {
@@ -496,6 +618,11 @@ tr:hover td{background:rgba(0,0,0,.015)}
       const target = this.getAttribute("data-tab");
       $("#tab-tokens").classList.toggle("hidden", target !== "tokens");
       $("#tab-models").classList.toggle("hidden", target !== "models");
+      $("#tab-usage").classList.toggle("hidden", target !== "usage");
+      if (target === "usage" && !usageLoaded) {
+        usageLoaded = true;
+        loadUsage();
+      }
     });
   });
 

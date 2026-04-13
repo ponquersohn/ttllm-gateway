@@ -15,9 +15,11 @@ from ttllm.cli._common import (
     print_json,
 )
 
-app = typer.Typer(help="Self-service: view your models and manage your tokens")
+app = typer.Typer(help="Self-service: view your models, tokens, and usage")
 tokens_app = typer.Typer(help="Manage your own tokens")
 app.add_typer(tokens_app, name="tokens")
+usage_app = typer.Typer(help="View your own usage and costs")
+app.add_typer(usage_app, name="usage")
 
 
 @app.command("models")
@@ -116,3 +118,76 @@ def me_tokens_delete(
             console.print("[green]Token revoked.[/green]")
         else:
             handle_response(resp)
+
+
+# --- Usage ---
+
+
+@usage_app.command("summary")
+@usage_app.callback(invoke_without_command=True)
+def me_usage_summary(
+    since: Optional[str] = typer.Option(None, help="Start date (ISO)"),
+    until: Optional[str] = typer.Option(None, help="End date (ISO)"),
+    as_json: bool = JSON_OPTION,
+):
+    """View your usage summary."""
+    params = {}
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
+
+    with get_client() as client:
+        data = handle_response(client.get("/me/usage", params=params))
+
+    if as_json:
+        print_json(data)
+        return
+
+    console.print("[bold]My Usage Summary[/bold]")
+    console.print(f"  Total requests: {data['total_requests']}")
+    console.print(f"  Total input tokens: {data['total_input_tokens']}")
+    console.print(f"  Total output tokens: {data['total_output_tokens']}")
+    console.print(f"  Avg latency: {data['avg_latency_ms']}ms")
+
+
+@usage_app.command("costs")
+def me_usage_costs(
+    since: Optional[str] = typer.Option(None, help="Start date (ISO)"),
+    until: Optional[str] = typer.Option(None, help="End date (ISO)"),
+    as_json: bool = JSON_OPTION,
+):
+    """View your cost breakdown by model."""
+    params = {}
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
+
+    with get_client() as client:
+        data = handle_response(client.get("/me/usage/costs", params=params))
+
+    if as_json:
+        print_json(data)
+        return
+
+    if not data:
+        console.print("[yellow]No usage data found.[/yellow]")
+        return
+
+    table = Table(title="My Cost Breakdown")
+    table.add_column("Model")
+    table.add_column("Requests", justify="right")
+    table.add_column("Input Tokens", justify="right")
+    table.add_column("Output Tokens", justify="right")
+    table.add_column("Total Cost", justify="right")
+
+    for item in data:
+        table.add_row(
+            item["model_name"],
+            str(item["request_count"]),
+            str(item["input_tokens"]),
+            str(item["output_tokens"]),
+            f"${item['total_cost']}",
+        )
+    console.print(table)
