@@ -108,6 +108,22 @@ tr:hover td{background:rgba(0,0,0,.015)}
 .preset-btn{background:none;border:1px solid var(--border);border-radius:var(--radius);padding:4px 10px;cursor:pointer;font-size:12px;color:var(--text-secondary)}
 .preset-btn:hover,.preset-btn.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 
+/* Chat panel */
+.chat-panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;margin-top:20px;box-shadow:var(--shadow)}
+.chat-panel-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.chat-panel-header h3{font-size:16px}
+.chat-messages{border:1px solid var(--border);border-radius:var(--radius);padding:12px;height:320px;overflow-y:auto;margin-bottom:12px;background:var(--bg)}
+.chat-msg{margin-bottom:12px;line-height:1.5}
+.chat-msg:last-child{margin-bottom:0}
+.chat-msg-user{background:#e0e7ff;border-radius:var(--radius);padding:8px 12px;margin-left:40px;font-size:14px}
+.chat-msg-assistant{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;margin-right:40px;font-size:14px;white-space:pre-wrap;word-wrap:break-word}
+.chat-msg-error{background:#fef2f2;border:1px solid var(--danger);border-radius:var(--radius);padding:8px 12px;margin-right:40px;font-size:14px;color:var(--danger)}
+.chat-msg-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-secondary);margin-bottom:2px}
+.chat-input-row{display:flex;gap:8px}
+.chat-input-row textarea{flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:14px;font-family:inherit;resize:vertical;min-height:40px;max-height:120px;outline:none;transition:border-color .15s}
+.chat-input-row textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.chat-meta{font-size:12px;color:var(--text-secondary);margin-top:8px}
+
 /* Responsive */
 @media(max-width:600px){
   .container{padding:16px 12px}
@@ -197,6 +213,18 @@ tr:hover td{background:rgba(0,0,0,.015)}
       <div id="models-table-wrapper">
         <div class="loading"><span class="spinner"></span> Loading models...</div>
       </div>
+    </div>
+    <div id="chat-panel" class="chat-panel hidden">
+      <div class="chat-panel-header">
+        <h3>Chat &mdash; <span id="chat-model-name"></span></h3>
+        <button class="btn btn-secondary" id="chat-close-btn">Close</button>
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-input-row">
+        <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
+        <button class="btn btn-primary" id="chat-send-btn">Send</button>
+      </div>
+      <div class="chat-meta hidden" id="chat-meta"></div>
     </div>
   </div>
 
@@ -522,12 +550,19 @@ tr:hover td{background:rgba(0,0,0,.015)}
       modelsWrapper.innerHTML = '<div class="no-data">No models assigned to your account.</div>';
       return;
     }
-    let html = '<table><thead><tr><th>Name</th><th>Provider</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Name</th><th>Provider</th><th>Action</th></tr></thead><tbody>';
     models.forEach(function(m) {
-      html += '<tr><td>' + escapeHtml(m.name) + '</td><td>' + escapeHtml(m.provider) + '</td></tr>';
+      html += '<tr><td>' + escapeHtml(m.name) + '</td><td>' + escapeHtml(m.provider) + '</td>' +
+        '<td><button class="btn btn-secondary" data-chat-model="' + escapeAttr(m.name) + '">Chat</button></td></tr>';
     });
     html += '</tbody></table>';
     modelsWrapper.innerHTML = html;
+
+    modelsWrapper.querySelectorAll("[data-chat-model]").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        openChat(this.getAttribute("data-chat-model"));
+      });
+    });
   }
 
   // --- Usage ---
@@ -625,6 +660,153 @@ tr:hover td{background:rgba(0,0,0,.015)}
       }
     });
   });
+
+  // --- Chat ---
+  let chatModel = null;
+  let chatStreaming = false;
+  const chatPanel = $("#chat-panel");
+  const chatMessages = $("#chat-messages");
+  const chatInput = $("#chat-input");
+  const chatSendBtn = $("#chat-send-btn");
+  const chatMeta = $("#chat-meta");
+  const chatModelName = $("#chat-model-name");
+
+  function openChat(modelName) {
+    chatModel = modelName;
+    chatModelName.textContent = modelName;
+    chatMessages.innerHTML = "";
+    chatMeta.classList.add("hidden");
+    chatMeta.textContent = "";
+    chatInput.value = "";
+    chatPanel.classList.remove("hidden");
+    chatInput.focus();
+  }
+
+  function closeChat() {
+    chatPanel.classList.add("hidden");
+    chatModel = null;
+    chatStreaming = false;
+  }
+
+  $("#chat-close-btn").addEventListener("click", closeChat);
+
+  chatInput.addEventListener("keydown", function(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+
+  chatSendBtn.addEventListener("click", sendChatMessage);
+
+  async function sendChatMessage() {
+    if (chatStreaming || !chatModel) return;
+    var text = chatInput.value.trim();
+    if (!text) return;
+
+    // Show user message
+    var userDiv = document.createElement("div");
+    userDiv.className = "chat-msg";
+    userDiv.innerHTML = '<div class="chat-msg-label">You</div><div class="chat-msg-user"></div>';
+    userDiv.querySelector(".chat-msg-user").textContent = text;
+    chatMessages.appendChild(userDiv);
+
+    // Prepare assistant message placeholder
+    var assistantDiv = document.createElement("div");
+    assistantDiv.className = "chat-msg";
+    assistantDiv.innerHTML = '<div class="chat-msg-label">Assistant</div><div class="chat-msg-assistant"></div>';
+    var assistantContent = assistantDiv.querySelector(".chat-msg-assistant");
+    assistantContent.textContent = "";
+    chatMessages.appendChild(assistantDiv);
+
+    chatInput.value = "";
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    chatStreaming = true;
+    chatSendBtn.disabled = true;
+    chatSendBtn.textContent = "...";
+    chatMeta.classList.add("hidden");
+
+    var inputTokens = 0;
+    var outputTokens = 0;
+
+    try {
+      var resp = await fetch("/anthropic/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": accessToken,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: chatModel,
+          messages: [{ role: "user", content: text }],
+          max_tokens: 4096,
+          stream: true
+        })
+      });
+
+      if (!resp.ok) {
+        var errBody = await resp.text();
+        try { errBody = JSON.parse(errBody); errBody = errBody.error && errBody.error.message || JSON.stringify(errBody); } catch(_){}
+        throw new Error(errBody);
+      }
+
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+
+      while (true) {
+        var result = await reader.read();
+        if (result.done) break;
+        buffer += decoder.decode(result.value, { stream: true });
+
+        var lines = buffer.split("\n");
+        buffer = lines.pop(); // keep incomplete line
+
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i].trim();
+          if (!line.startsWith("data: ")) continue;
+          var payload = line.slice(6);
+          if (payload === "[DONE]") continue;
+
+          try {
+            var evt = JSON.parse(payload);
+          } catch(_) { continue; }
+
+          if (evt.type === "message_start" && evt.message && evt.message.usage) {
+            inputTokens = evt.message.usage.input_tokens || 0;
+          } else if (evt.type === "content_block_delta" && evt.delta && evt.delta.text) {
+            assistantContent.textContent += evt.delta.text;
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+          } else if (evt.type === "message_delta" && evt.usage) {
+            outputTokens = evt.usage.output_tokens || 0;
+          }
+        }
+      }
+
+      // Show token usage
+      if (inputTokens || outputTokens) {
+        chatMeta.textContent = "Tokens: " + inputTokens.toLocaleString() + " input, " + outputTokens.toLocaleString() + " output";
+        chatMeta.classList.remove("hidden");
+      }
+
+      if (!assistantContent.textContent) {
+        assistantContent.textContent = "(empty response)";
+      }
+
+    } catch (err) {
+      assistantDiv.querySelector(".chat-msg-assistant").remove();
+      var errDiv = document.createElement("div");
+      errDiv.className = "chat-msg-error";
+      errDiv.textContent = "Error: " + err.message;
+      assistantDiv.appendChild(errDiv);
+    } finally {
+      chatStreaming = false;
+      chatSendBtn.disabled = false;
+      chatSendBtn.textContent = "Send";
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+  }
 
   // --- Helpers ---
   function escapeHtml(str) {
