@@ -233,11 +233,15 @@ async def create_token(
     default_ttl = settings.auth.jwt.token_ttl_days
     max_ttl = settings.auth.jwt.token_max_ttl_days
     if ttl_days is not None:
-        if ttl_days < 1 or ttl_days > max_ttl:
-            raise ValueError(f"ttl_days must be between 1 and {max_ttl}")
+        if ttl_days == 0:
+            ttl = timedelta(seconds=10)
+        elif 1 <= ttl_days <= max_ttl:
+            ttl = timedelta(days=ttl_days)
+        else:
+            raise ValueError(f"ttl_days must be 0 (ephemeral) or between 1 and {max_ttl}")
     else:
-        ttl_days = default_ttl
-    expires_at = datetime.now(UTC) + timedelta(days=ttl_days)
+        ttl = timedelta(days=default_ttl)
+    expires_at = datetime.now(UTC) + ttl
 
     gt = Token(
         user_id=user_id,
@@ -249,7 +253,6 @@ async def create_token(
     await db.commit()
     await db.refresh(gt)
 
-    ttl = timedelta(days=ttl_days)
     access_token = create_access_token(
         user_id=user_id,
         permissions=sorted(requested),

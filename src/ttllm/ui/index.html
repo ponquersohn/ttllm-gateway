@@ -731,10 +731,21 @@ tr:hover td{background:rgba(0,0,0,.015)}
     var outputTokens = 0;
 
     try {
+      // Mint an ephemeral 10-second token with llm.invoke permission
+      var tokenResp = await apiFetch("/me/tokens", {
+        method: "POST",
+        body: { label: "ui-chat-test", ttl_days: 0, permissions: ["llm.invoke"] }
+      });
+      if (!tokenResp || !tokenResp.ok) {
+        var tokenErr = await (tokenResp ? tokenResp.text() : Promise.resolve("Failed to create chat token"));
+        throw new Error("Could not create chat token: " + tokenErr);
+      }
+      var chatToken = (await tokenResp.json()).access_token;
+
       var resp = await fetch("/anthropic/v1/messages", {
         method: "POST",
         headers: {
-          "x-api-key": accessToken,
+          "x-api-key": chatToken,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
