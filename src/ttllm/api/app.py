@@ -7,10 +7,22 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.staticfiles import StaticFiles
 
 from ttllm import __version__
 from ttllm.config import settings
+
+
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 def create_app() -> FastAPI:
@@ -20,11 +32,15 @@ def create_app() -> FastAPI:
         version=__version__,
     )
 
-    # CORS
+    app.add_middleware(_SecurityHeadersMiddleware)
+
+    # CORS — disable credentials when origins include wildcard
+    origins = settings.engine.cors_origins
+    allow_creds = "*" not in origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.engine.cors_origins,
-        allow_credentials=True,
+        allow_origins=origins,
+        allow_credentials=allow_creds,
         allow_methods=["*"],
         allow_headers=["*"],
     )

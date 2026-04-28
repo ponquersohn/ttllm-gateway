@@ -40,11 +40,13 @@ def get_permission_registry() -> PermissionRegistry:
 def _jwt_config() -> JWTConfig:
     return JWTConfig(
         secret_key=settings.auth.jwt.secret_key,
-        algorithm=settings.auth.jwt.algorithm,
     )
 
 
 # --- Local authentication ---
+
+
+_DUMMY_HASH = "$2b$12$LJ3m4ys3Lg2HEOFqIHwJNOd1bnMqGgYqJmGx4Q7GkWbM0FHXN0kCq"
 
 
 async def authenticate_local(
@@ -55,13 +57,8 @@ async def authenticate_local(
     """Verify email + password for an internal user. Returns User or None."""
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if not user:
-        return None
-    if not user.is_active:
-        return None
-    if user.identity_provider is not None:
-        return None  # SSO user cannot login with password
-    if not user.password_hash:
+    if not user or not user.is_active or user.identity_provider is not None or not user.password_hash:
+        verify_password(password, _DUMMY_HASH)
         return None
     if not verify_password(password, user.password_hash):
         return None
@@ -329,6 +326,7 @@ async def provision_sso_user(
     idp_slug: str,
     user_info: dict,
     target_groups: set[str],
+    sso_managed_groups: set[str] | None = None,
 ) -> User:
     """Look up or create a user from SSO claims. JIT provisioning.
 
@@ -359,8 +357,7 @@ async def provision_sso_user(
         await db.flush()
 
     # Sync group memberships on every login
-    if target_groups:
-        await _sync_user_groups(db, user, target_groups)
+    await _sync_user_groups(db, user, target_groups, sso_managed_groups or target_groups)
 
     await db.commit()
     await db.refresh(user)
@@ -371,33 +368,46 @@ async def _sync_user_groups(
     db: AsyncSession,
     user: User,
     target_group_names: set[str],
+    sso_managed_group_names: set[str],
 ) -> None:
-    """Ensure user belongs to all target groups. Adds missing memberships.
+    """Sync SSO-managed group memberships: add missing, remove stale.
 
-    Raises ValueError if any target group names don't exist in the DB.
+    Only removes memberships for groups in sso_managed_group_names that are
+    not in target_group_names. Manually-assigned groups are left untouched.
     """
     from ttllm.models.auth import Group
 
+    all_managed_names = sso_managed_group_names | target_group_names
     grp_result = await db.execute(
         select(Group).where(
-            Group.name.in_(target_group_names),
+            Group.name.in_(all_managed_names),
             Group.is_active == True,  # noqa: E712
         )
     )
-    found_groups = list(grp_result.scalars().all())
-    found_names = {g.name for g in found_groups}
-    missing = target_group_names - found_names
+    all_groups = list(grp_result.scalars().all())
+    groups_by_name = {g.name: g for g in all_groups}
+
+    missing = target_group_names - groups_by_name.keys()
     if missing:
         raise ValueError(f"SSO group sync failed: groups not found in DB: {', '.join(sorted(missing))}")
 
     existing = await db.execute(
-        select(UserGroup.group_id).where(UserGroup.user_id == user.id)
+        select(UserGroup).where(UserGroup.user_id == user.id)
     )
-    existing_group_ids = {row[0] for row in existing.all()}
+    existing_memberships = {ug.group_id: ug for ug in existing.scalars().all()}
 
-    for group in found_groups:
-        if group.id not in existing_group_ids:
-            db.add(UserGroup(user_id=user.id, group_id=group.id))
+    target_group_ids = {groups_by_name[n].id for n in target_group_names}
+    managed_group_ids = {groups_by_name[n].id for n in sso_managed_group_names if n in groups_by_name}
+
+    # Add missing memberships
+    for gid in target_group_ids:
+        if gid not in existing_memberships:
+            db.add(UserGroup(user_id=user.id, group_id=gid))
+
+    # Remove stale SSO-managed memberships
+    for gid, ug in existing_memberships.items():
+        if gid in managed_group_ids and gid not in target_group_ids:
+            await db.delete(ug)
 
 
 # --- User-level permission management ---

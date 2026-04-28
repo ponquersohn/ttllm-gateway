@@ -34,7 +34,6 @@ class EngineConfig(BaseModel):
 
 class JWTConfig(BaseModel):
     secret_key: str = "CHANGE-ME-IN-PRODUCTION"
-    algorithm: str = "HS256"
     access_token_ttl_minutes: int = 15
     refresh_token_ttl_days: int = 30
     token_ttl_days: int = 30
@@ -67,6 +66,7 @@ class AuthConfig(BaseModel):
 
 class ProviderConfig(BaseModel):
     default_region: str = "us-east-1"
+    allowed_base_urls: list[str] = []
 
 
 class SecretsConfig(BaseModel):
@@ -254,7 +254,7 @@ class ConfigLoader:
 
             new_stack = include_stack | {str(resolved)}
             with resolved.open(encoding="utf-8", mode="r") as f:
-                inc_config = yaml.load(f, Loader=yaml.FullLoader)
+                inc_config = yaml.load(f, Loader=yaml.SafeLoader)
 
             if inc_config and isinstance(inc_config, dict):
                 inc_config = self._process_includes(inc_config, resolved.parent, new_stack)
@@ -302,7 +302,7 @@ class ConfigLoader:
     def _load_config_file(self, config_file_path: Path, load_local: bool = True):
         with config_file_path.open(encoding="utf-8", mode="r") as config_file:
             self.logger.debug(f"Attempting to load config file {config_file_path}")
-            config = yaml.load(config_file, Loader=yaml.FullLoader)
+            config = yaml.load(config_file, Loader=yaml.SafeLoader)
 
             if config and isinstance(config, dict):
                 config = self._process_includes(config, config_file_path.parent)
@@ -400,6 +400,34 @@ class ConfigLoader:
         return config
 
 
+_DEFAULT_JWT_SECRET = "CHANGE-ME-IN-PRODUCTION"
+
+
+def _validate_settings(s: Settings, environment: str) -> None:
+    """Validate critical settings at startup."""
+    logger = logging.getLogger("ttllm.config")
+
+    if s.auth.jwt.secret_key == _DEFAULT_JWT_SECRET:
+        if environment and environment != "dev":
+            raise SystemExit(
+                f"FATAL: JWT secret_key is the default value. "
+                f"Set a strong secret via config or TTLLM_AUTH__JWT__SECRET_KEY before running in '{environment}'."
+            )
+        logger.warning("JWT secret_key is using the default value — do NOT use this in production")
+
+    enc_key = s.secrets.encryption_key
+    if enc_key:
+        from ttllm.core.secrets import validate_fernet_key
+
+        if not validate_fernet_key(enc_key):
+            raise SystemExit(
+                "FATAL: secrets.encryption_key is set but is not a valid Fernet key. "
+                "Generate one with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+            )
+    else:
+        logger.warning("secrets.encryption_key is not set — secret storage features will be unavailable")
+
+
 def load_settings(
     config_file: Union[Path, str] = None,
     environment: str = None,
@@ -411,16 +439,19 @@ def load_settings(
     If no config file is found, returns plain Settings (env vars + defaults only).
     """
     config_file = config_file or os.getenv("TTLLM_CONFIG_FILE")
-    if config_file is None:
-        return Settings()
-
     environment = environment or os.getenv("TTLLM_CONFIG_ENV", "dev")
-    config_dict = ConfigLoader(
-        config_file=config_file,
-        environment=environment,
-    ).config
 
-    return Settings(**config_dict)
+    if config_file is None:
+        s = Settings()
+    else:
+        config_dict = ConfigLoader(
+            config_file=config_file,
+            environment=environment,
+        ).config
+        s = Settings(**config_dict)
+
+    _validate_settings(s, environment)
+    return s
 
 
 settings = load_settings()

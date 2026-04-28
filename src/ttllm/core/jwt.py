@@ -11,10 +11,12 @@ from datetime import UTC, datetime, timedelta
 import jwt as pyjwt
 
 
+_ALGORITHM = "HS256"
+
+
 @dataclass(frozen=True)
 class JWTConfig:
     secret_key: str
-    algorithm: str = "HS256"
     issuer: str = "ttllm"
 
 
@@ -44,7 +46,7 @@ def create_access_token(
         "exp": now + ttl,
         "iss": config.issuer,
     }
-    return pyjwt.encode(payload, config.secret_key, algorithm=config.algorithm)
+    return pyjwt.encode(payload, config.secret_key, algorithm=_ALGORITHM)
 
 
 def decode_token(token: str, config: JWTConfig) -> TokenPayload:
@@ -55,7 +57,7 @@ def decode_token(token: str, config: JWTConfig) -> TokenPayload:
     data = pyjwt.decode(
         token,
         config.secret_key,
-        algorithms=[config.algorithm],
+        algorithms=[_ALGORITHM],
         issuer=config.issuer,
         options={"require": ["sub", "permissions", "jti", "exp", "iat"]},
     )

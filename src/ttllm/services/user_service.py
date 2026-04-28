@@ -77,8 +77,9 @@ async def update_user(
         if pw is not None:
             user.password_hash = hash_password(pw)
 
+    _MUTABLE_FIELDS = {"name", "email", "is_active"}
     for key, value in kwargs.items():
-        if hasattr(user, key) and value is not None:
+        if key in _MUTABLE_FIELDS and value is not None:
             setattr(user, key, value)
     await db.commit()
     await db.refresh(user)

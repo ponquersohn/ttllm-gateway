@@ -5,12 +5,47 @@ Caches model instances by model ID + config hash to avoid re-creating clients.
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 from collections import OrderedDict
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
 
 from ttllm.config import settings
+
+
+_BLOCKED_META_HOSTS = {"169.254.169.254", "metadata.google.internal", "100.100.100.200"}
+
+
+def _validate_base_url(url: str) -> None:
+    """Validate base_url against the configured allowlist and block private/metadata targets."""
+    import re
+
+    allowed = settings.provider.allowed_base_urls
+    if not allowed:
+        raise ValueError("No allowed_base_urls configured — custom base_url is disabled")
+    if not any(re.fullmatch(pattern, url) for pattern in allowed):
+        raise ValueError(f"base_url does not match any allowed pattern")
+
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"Invalid base_url: {url}")
+    if hostname in _BLOCKED_META_HOSTS:
+        raise ValueError(f"base_url targets a blocked metadata endpoint")
+    try:
+        addr = ipaddress.ip_address(hostname)
+    except ValueError:
+        resolved = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for _, _, _, _, sockaddr in resolved:
+            addr = ipaddress.ip_address(sockaddr[0])
+            if addr.is_private or addr.is_loopback or addr.is_link_local:
+                raise ValueError(f"base_url resolves to a private address")
+        return
+    if addr.is_private or addr.is_loopback or addr.is_link_local:
+        raise ValueError(f"base_url targets a private address")
 
 
 class ProviderRegistry:
@@ -98,12 +133,15 @@ def _openai_factory(llm_model: Any, invoke_params: dict[str, Any]) -> BaseChatMo
     from langchain_community.chat_models import ChatOpenAI
 
     config = llm_model.config_json or {}
+    base_url = config.get("base_url")
+    if base_url:
+        _validate_base_url(base_url)
     return ChatOpenAI(
         model=llm_model.provider_model_id,
         max_tokens=invoke_params.get("max_tokens", 4096),
         temperature=invoke_params.get("temperature", 1.0),
         openai_api_key=config.get("api_key", ""),
-        openai_api_base=config.get("base_url"),
+        openai_api_base=base_url,
     )
 
 
