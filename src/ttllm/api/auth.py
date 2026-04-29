@@ -127,7 +127,7 @@ async def sso_authorize(idp_slug: str, db: DB, final_redirect: str | None = None
         redirect_uri=callback_uri,
         state=state,
         nonce=nonce,
-        scopes=idp_config.scopes,
+        scopes=list(idp_config.scopes) + (["offline_access"] if "offline_access" not in idp_config.scopes else []),
         code_challenge=code_challenge,
     )
     return RedirectResponse(url=auth_url)
@@ -198,6 +198,7 @@ async def sso_callback(
         user_info=user_info,
         target_groups=target_groups,
         sso_managed_groups=sso_managed_groups,
+        idp_refresh_token=token_data.get("refresh_token"),
     )
 
     result = await auth_service.create_management_tokens(db, user)

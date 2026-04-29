@@ -71,7 +71,7 @@
             }
         }
     },
-    "postCreateCommand": "bash -lc 'until command -v python3 >/dev/null 2>&1; do echo \"Waiting for python3...\"; sleep 2; done && sudo chown vscode:vscode .venv && python3 -m venv .venv && source .venv/bin/activate && pip install -e \".[dev]\"'",
+    "postCreateCommand": "bash -lc 'for script in .devcontainer/post_create/*; do [ -x \"$script\" ] || continue; echo \"Running $script...\"; \"$script\" || exit 1; done'",
     "mounts": [
         "type=volume,target=/workspaces/ttllm/.venv"
     ],
@@ -85,7 +85,6 @@
         "ghcr.io/devcontainers/features/aws-cli:1": {},
         "ghcr.io/devcontainers/features/github-cli:1": {},
         "ghcr.io/prulloac/devcontainer-features/pre-commit:1": {},
-        "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
         "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
     }
 }

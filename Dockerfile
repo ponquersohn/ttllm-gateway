@@ -14,6 +14,9 @@ COPY alembic/ alembic/
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh && pip install --no-cache-dir -e .
 
+RUN useradd -r -s /bin/false ttllm
+USER ttllm
+
 EXPOSE 8000
 
 ENTRYPOINT ["./entrypoint.sh"]

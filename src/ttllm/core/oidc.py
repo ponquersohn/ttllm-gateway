@@ -106,6 +106,28 @@ async def exchange_code(
         return resp.json()
 
 
+async def refresh_tokens(
+    endpoints: OIDCEndpoints,
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+) -> dict:
+    """Use a refresh token to obtain fresh tokens from the IdP token endpoint."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            endpoints.token_endpoint,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def fetch_userinfo(
     endpoints: OIDCEndpoints,
     access_token: str,

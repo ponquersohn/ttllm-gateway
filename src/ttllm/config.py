@@ -16,7 +16,7 @@ from typing import Union
 import boto3
 import yaml
 from lru import LRU
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,6 +50,14 @@ class IdPConfig(BaseModel):
     scopes: list[str] = ["openid", "profile", "email"]
     group_mapping: dict[str, list[str]] = {}
     default_groups: list[str] = []
+    role_refresh_interval_seconds: int = 300
+
+    @field_validator("role_refresh_interval_seconds")
+    @classmethod
+    def _min_refresh_interval(cls, v: int) -> int:
+        if v < 60:
+            raise ValueError("role_refresh_interval_seconds must be >= 60")
+        return v
 
     def get_discovery_url(self) -> str:
         if self.discovery_url:
@@ -59,9 +67,19 @@ class IdPConfig(BaseModel):
         raise ValueError(f"IdP '{self.name}': either discovery_url or tenant_id must be set")
 
 
+class PasswordPolicy(BaseModel):
+    min_length: int = 10
+    max_length: int = 128
+    require_uppercase: bool = True
+    require_lowercase: bool = True
+    require_digit: bool = True
+    require_special: bool = True
+
+
 class AuthConfig(BaseModel):
     jwt: JWTConfig = JWTConfig()
     identity_providers: dict[str, IdPConfig] = {}
+    password_policy: PasswordPolicy = PasswordPolicy()
 
 
 class ProviderConfig(BaseModel):

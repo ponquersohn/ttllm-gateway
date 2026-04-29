@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from ttllm.config import settings
 from ttllm.core.jwt import (
@@ -327,6 +330,7 @@ async def provision_sso_user(
     user_info: dict,
     target_groups: set[str],
     sso_managed_groups: set[str] | None = None,
+    idp_refresh_token: str | None = None,
 ) -> User:
     """Look up or create a user from SSO claims. JIT provisioning.
 
@@ -356,12 +360,111 @@ async def provision_sso_user(
         db.add(user)
         await db.flush()
 
+    # Store encrypted IdP refresh token for background role sync
+    if idp_refresh_token:
+        encryption_key = settings.secrets.encryption_key
+        if encryption_key:
+            from ttllm.core.secrets import encrypt_value
+            user.idp_refresh_token = encrypt_value(idp_refresh_token, encryption_key)
+        else:
+            logger.warning("Cannot store IdP refresh token: secrets.encryption_key not configured")
+
+    user.last_role_sync_at = datetime.now(UTC)
+
     # Sync group memberships on every login
     await _sync_user_groups(db, user, target_groups, sso_managed_groups or target_groups)
 
     await db.commit()
     await db.refresh(user)
     return user
+
+
+async def maybe_refresh_sso_roles(db: AsyncSession, user: User) -> None:
+    """Lazy per-request check: refresh SSO user's roles from the IdP if the
+    configured interval has elapsed. Uses SELECT FOR UPDATE with double-check
+    to prevent concurrent races on refresh token rotation.
+    """
+    if not user.identity_provider or not user.idp_refresh_token:
+        return
+
+    idp_config = settings.auth.identity_providers.get(user.identity_provider)
+    if not idp_config:
+        return
+
+    now = datetime.now(UTC)
+    if user.last_role_sync_at and (now - user.last_role_sync_at).total_seconds() < idp_config.role_refresh_interval_seconds:
+        return
+
+    # Acquire row lock and double-check (another request may have refreshed)
+    result = await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    locked_user = result.scalar_one()
+
+    if locked_user.last_role_sync_at and (now - locked_user.last_role_sync_at).total_seconds() < idp_config.role_refresh_interval_seconds:
+        return
+
+    encryption_key = settings.secrets.encryption_key
+    if not encryption_key:
+        logger.warning("Cannot refresh SSO roles for user %s: encryption_key not configured", user.id)
+        return
+
+    from ttllm.core.secrets import decrypt_value, encrypt_value
+
+    try:
+        plain_refresh_token = decrypt_value(locked_user.idp_refresh_token, encryption_key)
+    except Exception:
+        logger.warning("Failed to decrypt refresh token for user %s, clearing it", user.id)
+        locked_user.idp_refresh_token = None
+        locked_user.last_role_sync_at = now
+        await db.commit()
+        return
+
+    from ttllm.core import oidc
+
+    try:
+        endpoints = await oidc.discover(idp_config.get_discovery_url())
+        token_data = await oidc.refresh_tokens(
+            endpoints=endpoints,
+            client_id=idp_config.client_id,
+            client_secret=idp_config.client_secret,
+            refresh_token=plain_refresh_token,
+        )
+    except Exception as exc:
+        logger.warning("SSO role refresh failed for user %s: %s", user.id, exc)
+        locked_user.idp_refresh_token = None
+        locked_user.last_role_sync_at = now
+        await db.commit()
+        return
+
+    # Store rotated refresh token
+    new_refresh_token = token_data.get("refresh_token")
+    if new_refresh_token:
+        locked_user.idp_refresh_token = encrypt_value(new_refresh_token, encryption_key)
+
+    # Extract roles from fresh ID token
+    id_token_raw = token_data.get("id_token", "")
+    target_groups = set(idp_config.default_groups)
+    if id_token_raw:
+        try:
+            id_payload = oidc.verify_id_token(
+                id_token_raw,
+                endpoints=endpoints,
+                client_id=idp_config.client_id,
+            )
+            idp_roles = oidc.extract_roles_from_id_token_payload(id_payload)
+            for role in idp_roles:
+                target_groups.update(idp_config.group_mapping.get(role, []))
+        except ValueError as exc:
+            logger.warning("ID token verification failed during role refresh for user %s: %s", user.id, exc)
+
+    sso_managed_groups = set(idp_config.default_groups)
+    for mapped in idp_config.group_mapping.values():
+        sso_managed_groups.update(mapped)
+
+    await _sync_user_groups(db, locked_user, target_groups, sso_managed_groups)
+    locked_user.last_role_sync_at = now
+    await db.commit()
 
 
 async def _sync_user_groups(

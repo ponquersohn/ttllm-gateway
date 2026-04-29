@@ -66,6 +66,8 @@ async def _authenticate(token: str, db: AsyncSession) -> AuthContext:
             detail={"type": "permission_error", "message": "User deactivated"},
         )
 
+    await auth_service.maybe_refresh_sso_roles(db, user)
+
     current_permissions = await auth_service.resolve_user_permissions(db, user.id)
 
     return AuthContext(
