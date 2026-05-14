@@ -27,8 +27,9 @@ class TTLLMClient(httpx.Client):
 
     @staticmethod
     def save_session(data: dict) -> None:
-        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        SESSION_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         SESSION_FILE.write_text(json.dumps(data, indent=2))
+        SESSION_FILE.chmod(0o600)
 
     @staticmethod
     def clear_session() -> None:

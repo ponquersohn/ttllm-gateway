@@ -60,8 +60,9 @@ async def update_group(
     group = await db.get(Group, group_id)
     if not group:
         return None
+    _MUTABLE_FIELDS = {"name", "description", "is_active"}
     for key, value in kwargs.items():
-        if hasattr(group, key) and value is not None:
+        if key in _MUTABLE_FIELDS and value is not None:
             setattr(group, key, value)
     await db.commit()
     await db.refresh(group, attribute_names=["permissions_rel"])

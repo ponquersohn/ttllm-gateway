@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -11,13 +12,20 @@ from ttllm.api.deps import AuthContext, DB, get_authenticated
 from ttllm.config import settings
 from ttllm.core import oidc
 from ttllm.schemas.auth import LoginRequest, LoginTokenResponse, RefreshRequest
-from ttllm.services import auth_service
+from ttllm.services import auth_service, oidc_state_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# In-memory store for OIDC state -> (code_verifier, idp_slug, redirect_uri)
-# In production, use Redis or a DB table with TTL.
-_oidc_state_store: dict[str, dict] = {}
+_ALLOWED_REDIRECT_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _validate_redirect(url: str) -> bool:
+    """Only allow redirects to localhost (CLI flow)."""
+    try:
+        parsed = urlparse(url)
+        return parsed.hostname in _ALLOWED_REDIRECT_HOSTS
+    except Exception:
+        return False
 
 
 @router.get("/identity-providers")
@@ -83,7 +91,7 @@ async def logout(
 
 
 @router.get("/sso/{idp_slug}/authorize")
-async def sso_authorize(idp_slug: str, final_redirect: str | None = None):
+async def sso_authorize(idp_slug: str, db: DB, final_redirect: str | None = None):
     """Start the OIDC authorization code flow. Redirects to the IdP.
 
     If final_redirect is provided (e.g. by the CLI), the callback will redirect
@@ -93,22 +101,25 @@ async def sso_authorize(idp_slug: str, final_redirect: str | None = None):
     if not idp_config:
         raise HTTPException(404, detail={"type": "not_found", "message": f"Identity provider '{idp_slug}' not found"})
 
+    if final_redirect and not _validate_redirect(final_redirect):
+        raise HTTPException(400, detail={"type": "invalid_request", "message": "final_redirect must point to localhost"})
+
     endpoints = await oidc.discover(idp_config.get_discovery_url())
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
     code_verifier, code_challenge = oidc.generate_pkce()
 
-    # The redirect_uri sent to the IdP must match what's registered
     base = settings.engine.base_url.rstrip("/")
     callback_uri = f"{base}/auth/sso/{idp_slug}/callback"
 
-    _oidc_state_store[state] = {
+    await oidc_state_service.store_state(db, state, {
         "code_verifier": code_verifier,
         "idp_slug": idp_slug,
         "redirect_uri": callback_uri,
         "nonce": nonce,
         "final_redirect": final_redirect,
-    }
+    })
+    await db.commit()
 
     auth_url = oidc.build_authorization_url(
         endpoints=endpoints,
@@ -116,7 +127,7 @@ async def sso_authorize(idp_slug: str, final_redirect: str | None = None):
         redirect_uri=callback_uri,
         state=state,
         nonce=nonce,
-        scopes=idp_config.scopes,
+        scopes=list(idp_config.scopes) + (["offline_access"] if "offline_access" not in idp_config.scopes else []),
         code_challenge=code_challenge,
     )
     return RedirectResponse(url=auth_url)
@@ -134,7 +145,7 @@ async def sso_callback(
     If the authorize step included a final_redirect (CLI flow), redirects to that
     URL with access_token and refresh_token as query params. Otherwise returns JSON.
     """
-    state_data = _oidc_state_store.pop(state, None)
+    state_data = await oidc_state_service.pop_state(db, state)
     if not state_data or state_data["idp_slug"] != idp_slug:
         raise HTTPException(400, detail={"type": "invalid_request", "message": "Invalid or expired state"})
 
@@ -158,11 +169,27 @@ async def sso_callback(
     idp_access_token = token_data.get("access_token", "")
     user_info = await oidc.fetch_userinfo(endpoints, idp_access_token)
 
-    # Extract roles from ID token and map to ttllm group names
-    idp_roles = oidc.extract_roles_from_id_token(token_data.get("id_token", ""))
+    # Verify ID token signature + nonce, then extract roles
+    id_token_raw = token_data.get("id_token", "")
     target_groups = set(idp_config.default_groups)
-    for idp_role in idp_roles:
-        target_groups.update(idp_config.group_mapping.get(idp_role, []))
+    if id_token_raw:
+        try:
+            id_payload = oidc.verify_id_token(
+                id_token_raw,
+                endpoints=endpoints,
+                client_id=idp_config.client_id,
+                nonce=state_data.get("nonce"),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, detail={"type": "invalid_request", "message": f"ID token verification failed: {exc}"})
+        idp_roles = oidc.extract_roles_from_id_token_payload(id_payload)
+        for idp_role in idp_roles:
+            target_groups.update(idp_config.group_mapping.get(idp_role, []))
+
+    # Compute the full set of groups this IdP can manage
+    sso_managed_groups = set(idp_config.default_groups)
+    for mapped in idp_config.group_mapping.values():
+        sso_managed_groups.update(mapped)
 
     # Provision or look up user, sync group memberships
     user = await auth_service.provision_sso_user(
@@ -170,6 +197,8 @@ async def sso_callback(
         idp_slug=idp_slug,
         user_info=user_info,
         target_groups=target_groups,
+        sso_managed_groups=sso_managed_groups,
+        idp_refresh_token=token_data.get("refresh_token"),
     )
 
     result = await auth_service.create_management_tokens(db, user)

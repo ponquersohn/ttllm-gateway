@@ -19,8 +19,15 @@ from ttllm.services import auth_service
 @dataclass
 class AuthContext:
     user: User
-    permissions: set[str]
+    token_permissions: set[str]
+    current_permissions: set[str]
     jti: uuid.UUID
+
+    @property
+    def permissions(self) -> set[str]:
+        """Effective permissions: intersection of what the token was issued with
+        and what the user currently holds in the DB."""
+        return self.token_permissions & self.current_permissions
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -32,7 +39,6 @@ async def _authenticate(token: str, db: AsyncSession) -> AuthContext:
     """Shared JWT validation and user loading."""
     jwt_config = JWTConfig(
         secret_key=settings.auth.jwt.secret_key,
-        algorithm=settings.auth.jwt.algorithm,
     )
 
     try:
@@ -60,9 +66,14 @@ async def _authenticate(token: str, db: AsyncSession) -> AuthContext:
             detail={"type": "permission_error", "message": "User deactivated"},
         )
 
+    await auth_service.maybe_refresh_sso_roles(db, user)
+
+    current_permissions = await auth_service.resolve_user_permissions(db, user.id)
+
     return AuthContext(
         user=user,
-        permissions=set(payload.permissions),
+        token_permissions=set(payload.permissions),
+        current_permissions=current_permissions,
         jti=payload.jti,
     )
 

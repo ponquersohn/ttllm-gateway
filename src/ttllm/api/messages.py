@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Annotated
 
@@ -15,6 +16,8 @@ from ttllm.core import gateway
 from ttllm.core.permissions import Permissions
 from ttllm.schemas.anthropic import MessagesRequest
 from ttllm.services import audit_service, model_service, secret_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -111,6 +114,7 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
         return JSONResponse(content=result.response.model_dump())
 
     except Exception as exc:
+        logger.exception("Invoke failed for request %s", request_id)
         await audit_service.log_request(
             db,
             user_id=user.id,
@@ -127,7 +131,7 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
             status_code=500,
             detail={
                 "type": "api_error",
-                "message": f"Internal error: {exc}",
+                "message": "An internal error occurred",
             },
         )
 
@@ -137,24 +141,24 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
         sse_stream, collector = await gateway.stream(body, llm_model, request_id)
 
         async def event_generator():
-            async for event in sse_stream:
-                yield event
-
-            # After stream completes, write audit log
-            stream_result = collector.finalize()
-            await audit_service.log_request(
-                db,
-                user_id=user.id,
-                model_id=llm_model.id,
-                request_id=request_id,
-                input_tokens=stream_result.input_tokens,
-                output_tokens=stream_result.output_tokens,
-                total_cost=str(stream_result.cost),
-                latency_ms=stream_result.latency_ms,
-                status_code=200,
-                metadata_json=metadata,
-                request_body=body.model_dump() if settings.engine.log_request_bodies else None,
-            )
+            try:
+                async for event in sse_stream:
+                    yield event
+            finally:
+                stream_result = collector.finalize()
+                await audit_service.log_request(
+                    db,
+                    user_id=user.id,
+                    model_id=llm_model.id,
+                    request_id=request_id,
+                    input_tokens=stream_result.input_tokens,
+                    output_tokens=stream_result.output_tokens,
+                    total_cost=str(stream_result.cost),
+                    latency_ms=stream_result.latency_ms,
+                    status_code=200,
+                    metadata_json=metadata,
+                    request_body=body.model_dump() if settings.engine.log_request_bodies else None,
+                )
 
         return StreamingResponse(
             event_generator(),
@@ -166,6 +170,7 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
             },
         )
     except Exception as exc:
+        logger.exception("Stream setup failed for request %s", request_id)
         await audit_service.log_request(
             db,
             user_id=user.id,
@@ -180,5 +185,5 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
         )
         raise HTTPException(
             status_code=500,
-            detail={"type": "api_error", "message": f"Internal error: {exc}"},
+            detail={"type": "api_error", "message": "An internal error occurred"},
         )

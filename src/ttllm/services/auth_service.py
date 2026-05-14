@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from ttllm.config import settings
 from ttllm.core.jwt import (
@@ -40,11 +43,13 @@ def get_permission_registry() -> PermissionRegistry:
 def _jwt_config() -> JWTConfig:
     return JWTConfig(
         secret_key=settings.auth.jwt.secret_key,
-        algorithm=settings.auth.jwt.algorithm,
     )
 
 
 # --- Local authentication ---
+
+
+_DUMMY_HASH = "$2b$12$LJ3m4ys3Lg2HEOFqIHwJNOd1bnMqGgYqJmGx4Q7GkWbM0FHXN0kCq"
 
 
 async def authenticate_local(
@@ -55,13 +60,8 @@ async def authenticate_local(
     """Verify email + password for an internal user. Returns User or None."""
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if not user:
-        return None
-    if not user.is_active:
-        return None
-    if user.identity_provider is not None:
-        return None  # SSO user cannot login with password
-    if not user.password_hash:
+    if not user or not user.is_active or user.identity_provider is not None or not user.password_hash:
+        verify_password(password, _DUMMY_HASH)
         return None
     if not verify_password(password, user.password_hash):
         return None
@@ -329,6 +329,8 @@ async def provision_sso_user(
     idp_slug: str,
     user_info: dict,
     target_groups: set[str],
+    sso_managed_groups: set[str] | None = None,
+    idp_refresh_token: str | None = None,
 ) -> User:
     """Look up or create a user from SSO claims. JIT provisioning.
 
@@ -358,46 +360,157 @@ async def provision_sso_user(
         db.add(user)
         await db.flush()
 
+    # Store encrypted IdP refresh token for background role sync
+    if idp_refresh_token:
+        encryption_key = settings.secrets.encryption_key
+        if encryption_key:
+            from ttllm.core.secrets import encrypt_value
+            user.idp_refresh_token = encrypt_value(idp_refresh_token, encryption_key)
+        else:
+            logger.warning("Cannot store IdP refresh token: secrets.encryption_key not configured")
+
+    user.last_role_sync_at = datetime.now(UTC)
+
     # Sync group memberships on every login
-    if target_groups:
-        await _sync_user_groups(db, user, target_groups)
+    await _sync_user_groups(db, user, target_groups, sso_managed_groups or target_groups)
 
     await db.commit()
     await db.refresh(user)
     return user
 
 
+async def maybe_refresh_sso_roles(db: AsyncSession, user: User) -> None:
+    """Lazy per-request check: refresh SSO user's roles from the IdP if the
+    configured interval has elapsed. Uses SELECT FOR UPDATE with double-check
+    to prevent concurrent races on refresh token rotation.
+    """
+    if not user.identity_provider or not user.idp_refresh_token:
+        return
+
+    idp_config = settings.auth.identity_providers.get(user.identity_provider)
+    if not idp_config:
+        return
+
+    now = datetime.now(UTC)
+    if user.last_role_sync_at and (now - user.last_role_sync_at).total_seconds() < idp_config.role_refresh_interval_seconds:
+        return
+
+    # Acquire row lock and double-check (another request may have refreshed)
+    result = await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    locked_user = result.scalar_one()
+
+    if locked_user.last_role_sync_at and (now - locked_user.last_role_sync_at).total_seconds() < idp_config.role_refresh_interval_seconds:
+        return
+
+    encryption_key = settings.secrets.encryption_key
+    if not encryption_key:
+        logger.warning("Cannot refresh SSO roles for user %s: encryption_key not configured", user.id)
+        return
+
+    from ttllm.core.secrets import decrypt_value, encrypt_value
+
+    try:
+        plain_refresh_token = decrypt_value(locked_user.idp_refresh_token, encryption_key)
+    except Exception:
+        logger.warning("Failed to decrypt refresh token for user %s, clearing it", user.id)
+        locked_user.idp_refresh_token = None
+        locked_user.last_role_sync_at = now
+        await db.commit()
+        return
+
+    from ttllm.core import oidc
+
+    try:
+        endpoints = await oidc.discover(idp_config.get_discovery_url())
+        token_data = await oidc.refresh_tokens(
+            endpoints=endpoints,
+            client_id=idp_config.client_id,
+            client_secret=idp_config.client_secret,
+            refresh_token=plain_refresh_token,
+        )
+    except Exception as exc:
+        logger.warning("SSO role refresh failed for user %s: %s", user.id, exc)
+        locked_user.idp_refresh_token = None
+        locked_user.last_role_sync_at = now
+        await db.commit()
+        return
+
+    # Store rotated refresh token
+    new_refresh_token = token_data.get("refresh_token")
+    if new_refresh_token:
+        locked_user.idp_refresh_token = encrypt_value(new_refresh_token, encryption_key)
+
+    # Extract roles from fresh ID token
+    id_token_raw = token_data.get("id_token", "")
+    target_groups = set(idp_config.default_groups)
+    if id_token_raw:
+        try:
+            id_payload = oidc.verify_id_token(
+                id_token_raw,
+                endpoints=endpoints,
+                client_id=idp_config.client_id,
+            )
+            idp_roles = oidc.extract_roles_from_id_token_payload(id_payload)
+            for role in idp_roles:
+                target_groups.update(idp_config.group_mapping.get(role, []))
+        except ValueError as exc:
+            logger.warning("ID token verification failed during role refresh for user %s: %s", user.id, exc)
+
+    sso_managed_groups = set(idp_config.default_groups)
+    for mapped in idp_config.group_mapping.values():
+        sso_managed_groups.update(mapped)
+
+    await _sync_user_groups(db, locked_user, target_groups, sso_managed_groups)
+    locked_user.last_role_sync_at = now
+    await db.commit()
+
+
 async def _sync_user_groups(
     db: AsyncSession,
     user: User,
     target_group_names: set[str],
+    sso_managed_group_names: set[str],
 ) -> None:
-    """Ensure user belongs to all target groups. Adds missing memberships.
+    """Sync SSO-managed group memberships: add missing, remove stale.
 
-    Raises ValueError if any target group names don't exist in the DB.
+    Only removes memberships for groups in sso_managed_group_names that are
+    not in target_group_names. Manually-assigned groups are left untouched.
     """
     from ttllm.models.auth import Group
 
+    all_managed_names = sso_managed_group_names | target_group_names
     grp_result = await db.execute(
         select(Group).where(
-            Group.name.in_(target_group_names),
+            Group.name.in_(all_managed_names),
             Group.is_active == True,  # noqa: E712
         )
     )
-    found_groups = list(grp_result.scalars().all())
-    found_names = {g.name for g in found_groups}
-    missing = target_group_names - found_names
+    all_groups = list(grp_result.scalars().all())
+    groups_by_name = {g.name: g for g in all_groups}
+
+    missing = target_group_names - groups_by_name.keys()
     if missing:
         raise ValueError(f"SSO group sync failed: groups not found in DB: {', '.join(sorted(missing))}")
 
     existing = await db.execute(
-        select(UserGroup.group_id).where(UserGroup.user_id == user.id)
+        select(UserGroup).where(UserGroup.user_id == user.id)
     )
-    existing_group_ids = {row[0] for row in existing.all()}
+    existing_memberships = {ug.group_id: ug for ug in existing.scalars().all()}
 
-    for group in found_groups:
-        if group.id not in existing_group_ids:
-            db.add(UserGroup(user_id=user.id, group_id=group.id))
+    target_group_ids = {groups_by_name[n].id for n in target_group_names}
+    managed_group_ids = {groups_by_name[n].id for n in sso_managed_group_names if n in groups_by_name}
+
+    # Add missing memberships
+    for gid in target_group_ids:
+        if gid not in existing_memberships:
+            db.add(UserGroup(user_id=user.id, group_id=gid))
+
+    # Remove stale SSO-managed memberships
+    for gid, ug in existing_memberships.items():
+        if gid in managed_group_ids and gid not in target_group_ids:
+            await db.delete(ug)
 
 
 # --- User-level permission management ---

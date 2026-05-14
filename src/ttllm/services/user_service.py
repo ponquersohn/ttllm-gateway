@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ttllm.core.password import hash_password
+from ttllm.core.password import hash_password, validate_password_policy
 from ttllm.models.user import User
 
 
@@ -19,6 +19,8 @@ async def create_user(
     identity_provider: str | None = None,
     external_id: str | None = None,
 ) -> User:
+    if password:
+        validate_password_policy(password)
     user = User(
         name=name,
         email=email,
@@ -75,10 +77,12 @@ async def update_user(
     if "password" in kwargs:
         pw = kwargs.pop("password")
         if pw is not None:
+            validate_password_policy(pw)
             user.password_hash = hash_password(pw)
 
+    _MUTABLE_FIELDS = {"name", "email", "is_active"}
     for key, value in kwargs.items():
-        if hasattr(user, key) and value is not None:
+        if key in _MUTABLE_FIELDS and value is not None:
             setattr(user, key, value)
     await db.commit()
     await db.refresh(user)

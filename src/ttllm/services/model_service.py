@@ -72,8 +72,9 @@ async def update_model(
     model = await db.get(LLMModel, model_id)
     if not model:
         return None
+    _MUTABLE_FIELDS = {"name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "is_active"}
     for key, value in kwargs.items():
-        if hasattr(model, key) and value is not None:
+        if key in _MUTABLE_FIELDS and value is not None:
             setattr(model, key, value)
     await db.commit()
     await db.refresh(model)

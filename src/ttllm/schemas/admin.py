@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+_SENSITIVE_KEY_PATTERN = re.compile(r"(secret|key|password|token|credential)", re.IGNORECASE)
+_REDACTED = "***REDACTED***"
+
+
+def _redact_dict(d: dict[str, Any]) -> dict[str, Any]:
+    """Recursively redact values whose keys look sensitive."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out[k] = _redact_dict(v)
+        elif _SENSITIVE_KEY_PATTERN.search(k):
+            out[k] = _REDACTED
+        elif isinstance(v, str) and v.startswith("secret://"):
+            out[k] = _REDACTED
+        else:
+            out[k] = v
+    return out
 
 
 # --- Users ---
@@ -81,6 +100,12 @@ class ModelResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def redact_config_secrets(self):
+        if self.config_json:
+            self.config_json = _redact_dict(self.config_json)
+        return self
 
 
 # --- Assignments ---
