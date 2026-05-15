@@ -48,6 +48,9 @@ async def invoke(
 ) -> InvokeResult:
     """Execute a non-streaming LLM request.
 
+    Uses streaming internally to avoid idle-connection timeouts on proxies
+    (e.g. Azure Container Apps / Envoy), then assembles the full response.
+
     Args:
         request: The parsed Anthropic-format request.
         llm_model: The ORM model with provider info and pricing.
@@ -62,7 +65,17 @@ async def invoke(
     invoke_params = translator.extract_invoke_params(request)
     chat_model = provider_registry.get_chat_model(llm_model, invoke_params)
 
-    result: AIMessage = await chat_model.ainvoke(messages)
+    # Stream internally so each chunk resets proxy idle timers,
+    # then accumulate into a single response for the caller.
+    result = None
+    async for chunk in chat_model.astream(messages):
+        if result is None:
+            result = chunk
+        else:
+            result = result + chunk
+
+    if result is None:
+        result = AIMessage(content="")
 
     input_tokens, output_tokens = token_tracker.extract_token_counts(result)
     cost = token_tracker.calculate_cost(input_tokens, output_tokens, llm_model)

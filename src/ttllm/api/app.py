@@ -30,13 +30,14 @@ def _authenticated_docs_html(variant: str, title: str) -> HTMLResponse:
     if variant == "swagger":
         body = """
     <div id="swagger-ui"></div>
-    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
     <script>
     SwaggerUIBundle({
       url: "/openapi.json",
       dom_id: "#swagger-ui",
-      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
       layout: "StandaloneLayout",
       requestInterceptor: function(req) {
         req.headers["Authorization"] = "Bearer " + sessionStorage.getItem("access_token");
@@ -46,10 +47,8 @@ def _authenticated_docs_html(variant: str, title: str) -> HTMLResponse:
     </script>"""
     else:
         body = """
-    <redoc spec-url="/openapi.json"></redoc>
-    <script src="https://cdn.jsdelivr.net/npm/redoc@latest/bundles/redoc.standalone.js"></script>
     <script>
-    // ReDoc fetches the spec itself; intercept fetch to add auth header
+    // Intercept fetch BEFORE ReDoc loads so the spec request includes auth
     (function() {
       var _fetch = window.fetch;
       window.fetch = function(url, opts) {
@@ -61,7 +60,9 @@ def _authenticated_docs_html(variant: str, title: str) -> HTMLResponse:
         return _fetch.call(this, url, opts);
       };
     })();
-    </script>"""
+    </script>
+    <redoc spec-url="/openapi.json"></redoc>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@latest/bundles/redoc.standalone.js"></script>"""
 
     return HTMLResponse(f"""<!DOCTYPE html>
 <html><head>
@@ -170,6 +171,15 @@ def create_app() -> FastAPI:
     # Mount self-service UI (static files)
     ui_dir = Path(__file__).resolve().parent.parent / "ui"
     if ui_dir.is_dir():
+
+        @app.get("/ui", include_in_schema=False)
+        async def ui_redirect(request: Request):
+            from starlette.responses import RedirectResponse
+
+            query = str(request.url.query)
+            target = "/ui/" + ("?" + query if query else "")
+            return RedirectResponse(url=target)
+
         app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app

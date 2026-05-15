@@ -6,6 +6,7 @@ import logging
 import uuid
 from typing import Annotated
 
+from botocore.exceptions import ClientError, ReadTimeoutError
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,36 @@ from ttllm.schemas.anthropic import MessagesRequest
 from ttllm.services import audit_service, model_service, secret_service
 
 logger = logging.getLogger(__name__)
+
+# Map Bedrock/AWS error codes to Anthropic-compatible error types and HTTP status codes.
+_BEDROCK_ERROR_MAP: dict[str, tuple[int, str]] = {
+    "ThrottlingException": (529, "overloaded_error"),
+    "ModelTimeoutException": (529, "overloaded_error"),
+    "ModelNotReadyException": (529, "overloaded_error"),
+    "ServiceUnavailableException": (529, "overloaded_error"),
+    "ServiceQuotaExceededException": (529, "overloaded_error"),
+    "AccessDeniedException": (403, "permission_error"),
+    "ResourceNotFoundException": (404, "not_found_error"),
+    "ValidationException": (400, "invalid_request_error"),
+    "ModelErrorException": (500, "api_error"),
+    "ModelStreamErrorException": (500, "api_error"),
+    "InternalServerException": (500, "api_error"),
+}
+
+
+def _classify_provider_error(exc: Exception) -> tuple[int, str, str]:
+    """Return (http_status, anthropic_error_type, message) for a provider exception."""
+    if isinstance(exc, ReadTimeoutError):
+        return (529, "overloaded_error", "Model request timed out — try again or use streaming")
+
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+        message = exc.response.get("Error", {}).get("Message", str(exc))
+        if code in _BEDROCK_ERROR_MAP:
+            status, error_type = _BEDROCK_ERROR_MAP[code]
+            return (status, error_type, message)
+
+    return (500, "api_error", "An internal error occurred")
 
 router = APIRouter()
 
@@ -114,7 +145,8 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
         return JSONResponse(content=result.response.model_dump())
 
     except Exception as exc:
-        logger.exception("Invoke failed for request %s", request_id)
+        status, error_type, message = _classify_provider_error(exc)
+        logger.exception("Invoke failed for request %s (type=%s)", request_id, error_type)
         await audit_service.log_request(
             db,
             user_id=user.id,
@@ -123,16 +155,13 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
             input_tokens=0,
             output_tokens=0,
             latency_ms=0,
-            status_code=500,
+            status_code=status,
             error_message=str(exc),
             metadata_json=metadata,
         )
         raise HTTPException(
-            status_code=500,
-            detail={
-                "type": "api_error",
-                "message": "An internal error occurred",
-            },
+            status_code=status,
+            detail={"type": error_type, "message": message},
         )
 
 
@@ -170,7 +199,8 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
             },
         )
     except Exception as exc:
-        logger.exception("Stream setup failed for request %s", request_id)
+        status, error_type, message = _classify_provider_error(exc)
+        logger.exception("Stream setup failed for request %s (type=%s)", request_id, error_type)
         await audit_service.log_request(
             db,
             user_id=user.id,
@@ -179,11 +209,11 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
             input_tokens=0,
             output_tokens=0,
             latency_ms=0,
-            status_code=500,
+            status_code=status,
             error_message=str(exc),
             metadata_json=metadata,
         )
         raise HTTPException(
-            status_code=500,
-            detail={"type": "api_error", "message": "An internal error occurred"},
+            status_code=status,
+            detail={"type": error_type, "message": message},
         )
