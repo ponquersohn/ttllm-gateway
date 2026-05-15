@@ -30,6 +30,8 @@ nonprod:
       - "env://TTLLM_CORS_ORIGIN,https://nonprod.example.com"
     log_request_bodies: true
   auth:
+    allowed_redirect_origins:
+      - "env://TTLLM_REDIRECT_ORIGIN,https://nonprod.example.com"
     identity_providers:
       entra:
         name: "Entra ID"
@@ -55,6 +57,8 @@ prod:
       - "env://TTLLM_CORS_ORIGIN,https://app.example.com"
     log_request_bodies: false
   auth:
+    allowed_redirect_origins:
+      - "env://TTLLM_REDIRECT_ORIGIN,https://app.example.com"
     jwt:
       secret_key: "secret://arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:ttllm/prod/jwt-secret"
     identity_providers:

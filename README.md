@@ -115,6 +115,8 @@ dev:
     cors_origins: ["*"]
     log_request_bodies: false
   auth:
+    allowed_redirect_origins:
+      - "https://myapp.example.com"
     jwt:
       secret_key: "dev-secret"
       algorithm: "HS256"

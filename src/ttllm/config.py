@@ -80,6 +80,7 @@ class AuthConfig(BaseModel):
     jwt: JWTConfig = JWTConfig()
     identity_providers: dict[str, IdPConfig] = {}
     password_policy: PasswordPolicy = PasswordPolicy()
+    allowed_redirect_origins: list[str] = []
 
 
 class ProviderConfig(BaseModel):
