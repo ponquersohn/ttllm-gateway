@@ -33,7 +33,7 @@ def _make_endpoints() -> OIDCEndpoints:
 
 
 class TestValidateRedirect:
-    """SSO final_redirect must point to localhost only."""
+    """SSO final_redirect must point to localhost or configured origins."""
 
     def test_localhost_allowed(self):
         assert _validate_redirect("http://localhost:8080/callback") is True
@@ -55,6 +55,26 @@ class TestValidateRedirect:
 
     def test_subdomain_rejected(self):
         assert _validate_redirect("https://localhost.evil.com/x") is False
+
+    def test_configured_origin_allowed(self):
+        with patch("ttllm.api.auth.settings") as mock_settings:
+            mock_settings.auth.allowed_redirect_origins = ["https://myapp.example.com"]
+            assert _validate_redirect("https://myapp.example.com/ui") is True
+
+    def test_configured_origin_with_port_allowed(self):
+        with patch("ttllm.api.auth.settings") as mock_settings:
+            mock_settings.auth.allowed_redirect_origins = ["https://myapp.example.com:8443"]
+            assert _validate_redirect("https://myapp.example.com:8443/ui") is True
+
+    def test_configured_origin_wrong_scheme_rejected(self):
+        with patch("ttllm.api.auth.settings") as mock_settings:
+            mock_settings.auth.allowed_redirect_origins = ["https://myapp.example.com"]
+            assert _validate_redirect("http://myapp.example.com/ui") is False
+
+    def test_unconfigured_origin_rejected(self):
+        with patch("ttllm.api.auth.settings") as mock_settings:
+            mock_settings.auth.allowed_redirect_origins = ["https://myapp.example.com"]
+            assert _validate_redirect("https://evil.com/steal") is False
 
 
 # ---------------------------------------------------------------------------

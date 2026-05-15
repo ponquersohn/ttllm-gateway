@@ -16,14 +16,19 @@ from ttllm.services import auth_service, oidc_state_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-_ALLOWED_REDIRECT_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_LOCALHOST_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def _validate_redirect(url: str) -> bool:
-    """Only allow redirects to localhost (CLI flow)."""
+    """Allow redirects to localhost (always) and configured origins."""
     try:
         parsed = urlparse(url)
-        return parsed.hostname in _ALLOWED_REDIRECT_HOSTS
+        if parsed.hostname in _LOCALHOST_HOSTS:
+            return True
+        target_origin = f"{parsed.scheme}://{parsed.hostname}"
+        if parsed.port:
+            target_origin += f":{parsed.port}"
+        return target_origin in settings.auth.allowed_redirect_origins
     except Exception:
         return False
 
