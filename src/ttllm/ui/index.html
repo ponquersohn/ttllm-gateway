@@ -90,6 +90,21 @@ tr:hover td{background:rgba(0,0,0,.015)}
 .token-reveal code{display:block;background:#fff;padding:8px;border-radius:4px;margin:8px 0;word-break:break-all;font-family:monospace;font-size:12px}
 .token-reveal .warning{color:#92400e;font-weight:500;font-size:12px;margin-top:4px}
 
+/* Config snippets */
+.config-section{margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px}
+.config-section h4{font-size:14px;margin-bottom:10px;color:var(--text)}
+.tool-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:12px}
+.tool-tab{padding:6px 14px;font-size:13px;font-weight:500;cursor:pointer;border:none;background:none;color:var(--text-secondary);border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s,border-color .15s}
+.tool-tab:hover{color:var(--text)}
+.tool-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.config-block{position:relative}
+.config-block pre{background:#1e293b;color:#e2e8f0;border-radius:var(--radius);padding:14px;font-size:12.5px;line-height:1.6;overflow-x:auto;white-space:pre;margin:0}
+.config-block pre .comment{color:#64748b}
+.config-block pre .key{color:#7dd3fc}
+.config-block pre .val{color:#86efac}
+.config-block .btn-copy-config{position:absolute;top:8px;right:8px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.15);border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px;color:#94a3b8}
+.config-block .btn-copy-config:hover{background:rgba(255,255,255,.2);color:#e2e8f0}
+
 /* Spinner */
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -376,6 +391,8 @@ tr:hover td{background:rgba(0,0,0,.015)}
     const data = await resp.json();
     storeTokens(data.access_token, data.refresh_token);
     await loadUser();
+    var returnTo = new URLSearchParams(window.location.search).get("return_to");
+    if (returnTo && returnTo.startsWith("/")) { window.location.href = returnTo; return; }
     showDashboard();
   }
 
@@ -510,20 +527,26 @@ tr:hover td{background:rgba(0,0,0,.015)}
         throw new Error((err && err.error && err.error.message) || "Failed to create token");
       }
       const data = await resp.json();
+      const token = data.access_token;
+      const baseUrl = window.location.origin;
+
       tokenCreated.innerHTML =
         '<strong>Token created!</strong>' +
-        '<code id="token-value">' + escapeHtml(data.access_token) + '</code>' +
+        '<code id="token-value">' + escapeHtml(token) + '</code>' +
         '<button class="btn-copy" id="copy-token-btn">Copy to clipboard</button>' +
-        '<div class="warning">Save this token now. It will not be shown again.</div>';
+        '<div class="warning">Save this token now. It will not be shown again.</div>' +
+        '<div id="config-snippets"></div>';
       tokenCreated.classList.remove("hidden");
 
       $("#copy-token-btn").addEventListener("click", function() {
-        navigator.clipboard.writeText(data.access_token).then(function() {
+        navigator.clipboard.writeText(token).then(function() {
           toast("Copied to clipboard", "success");
         }).catch(function() {
           toast("Copy failed — select and copy manually", "error");
         });
       });
+
+      renderConfigSnippets(token, baseUrl);
 
       $("#token-label").value = "";
       $("#token-ttl").value = "";
@@ -535,6 +558,97 @@ tr:hover td{background:rgba(0,0,0,.015)}
       btn.textContent = "Create token";
     }
   });
+
+  // --- Config snippets ---
+  function renderConfigSnippets(token, baseUrl) {
+    var apiUrl = baseUrl + "/anthropic";
+    var snippets = {
+      "Claude Code": {
+        text: '# Environment variables\n' +
+          'ANTHROPIC_BASE_URL=' + apiUrl + '\n' +
+          'ANTHROPIC_API_KEY=' + token + '\n\n' +
+          '# Or launch directly\n' +
+          'ANTHROPIC_BASE_URL=' + apiUrl + ' \\\n' +
+          'ANTHROPIC_API_KEY=' + token + ' \\\n' +
+          '  claude',
+        copyText: 'ANTHROPIC_BASE_URL=' + apiUrl + '\nANTHROPIC_API_KEY=' + token
+      },
+      "Cursor": {
+        text: '# In Cursor Settings > Models > Override OpenAI Base URL:\n' +
+          '#   Base URL:  ' + apiUrl + '\n' +
+          '#   API Key:   (paste token above)\n\n' +
+          '# Or via environment variables:\n' +
+          'ANTHROPIC_BASE_URL=' + apiUrl + '\n' +
+          'ANTHROPIC_API_KEY=' + token,
+        copyText: 'ANTHROPIC_BASE_URL=' + apiUrl + '\nANTHROPIC_API_KEY=' + token
+      },
+      "Cline": {
+        text: '# In Cline extension settings:\n' +
+          '#   API Provider:  Anthropic\n' +
+          '#   Base URL:      ' + apiUrl + '\n' +
+          '#   API Key:       (paste token above)',
+        copyText: apiUrl
+      },
+      "curl": {
+        text: 'curl ' + apiUrl + '/v1/messages \\\n' +
+          '  -H "x-api-key: ' + token + '" \\\n' +
+          '  -H "content-type: application/json" \\\n' +
+          '  -d \'{\n' +
+          '    "model": "MODEL_NAME",\n' +
+          '    "max_tokens": 1024,\n' +
+          '    "messages": [\n' +
+          '      {"role": "user", "content": "Hello"}\n' +
+          '    ]\n' +
+          '  }\'',
+        copyText: 'curl ' + apiUrl + '/v1/messages \\\n  -H "x-api-key: ' + token + '" \\\n  -H "content-type: application/json" \\\n  -d \'{"model": "MODEL_NAME", "max_tokens": 1024, "messages": [{"role": "user", "content": "Hello"}]}\''
+      }
+    };
+
+    var toolNames = Object.keys(snippets);
+    var tabsHtml = '<div class="tool-tabs">';
+    toolNames.forEach(function(name, i) {
+      tabsHtml += '<button class="tool-tab' + (i === 0 ? ' active' : '') + '" data-tool="' + escapeAttr(name) + '">' + escapeHtml(name) + '</button>';
+    });
+    tabsHtml += '</div>';
+
+    var blocksHtml = '';
+    toolNames.forEach(function(name, i) {
+      blocksHtml += '<div class="config-block" data-tool-block="' + escapeAttr(name) + '"' + (i > 0 ? ' style="display:none"' : '') + '>' +
+        '<button class="btn-copy-config" data-copy-tool="' + escapeAttr(name) + '">Copy</button>' +
+        '<pre>' + escapeHtml(snippets[name].text) + '</pre>' +
+        '</div>';
+    });
+
+    var container = document.getElementById("config-snippets");
+    container.innerHTML =
+      '<div class="config-section">' +
+        '<h4>Configuration</h4>' +
+        tabsHtml +
+        blocksHtml +
+      '</div>';
+
+    container.querySelectorAll(".tool-tab").forEach(function(tab) {
+      tab.addEventListener("click", function() {
+        container.querySelectorAll(".tool-tab").forEach(function(t) { t.classList.remove("active"); });
+        this.classList.add("active");
+        var tool = this.getAttribute("data-tool");
+        container.querySelectorAll(".config-block").forEach(function(b) {
+          b.style.display = b.getAttribute("data-tool-block") === tool ? "" : "none";
+        });
+      });
+    });
+
+    container.querySelectorAll(".btn-copy-config").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        var tool = this.getAttribute("data-copy-tool");
+        navigator.clipboard.writeText(snippets[tool].copyText).then(function() {
+          toast("Copied to clipboard", "success");
+        }).catch(function() {
+          toast("Copy failed — select and copy manually", "error");
+        });
+      });
+    });
+  }
 
   // --- Models ---
   async function loadModels() {
@@ -853,6 +967,8 @@ tr:hover td{background:rgba(0,0,0,.015)}
     if (accessToken) {
       await loadUser();
       if (currentUser) {
+        var returnTo = params.get("return_to");
+        if (returnTo && returnTo.startsWith("/")) { window.location.href = returnTo; return; }
         showDashboard();
       } else {
         clearTokens();

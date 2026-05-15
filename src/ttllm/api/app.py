@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.staticfiles import StaticFiles
 
@@ -25,11 +25,66 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+def _authenticated_docs_html(variant: str, title: str) -> HTMLResponse:
+    """Return Swagger UI or ReDoc HTML that reads the JWT from sessionStorage."""
+    if variant == "swagger":
+        body = """
+    <div id="swagger-ui"></div>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+    <script>
+    SwaggerUIBundle({
+      url: "/openapi.json",
+      dom_id: "#swagger-ui",
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "StandaloneLayout",
+      requestInterceptor: function(req) {
+        req.headers["Authorization"] = "Bearer " + sessionStorage.getItem("access_token");
+        return req;
+      }
+    });
+    </script>"""
+    else:
+        body = """
+    <redoc spec-url="/openapi.json"></redoc>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@latest/bundles/redoc.standalone.js"></script>
+    <script>
+    // ReDoc fetches the spec itself; intercept fetch to add auth header
+    (function() {
+      var _fetch = window.fetch;
+      window.fetch = function(url, opts) {
+        if (typeof url === "string" && url.includes("/openapi.json")) {
+          opts = opts || {};
+          opts.headers = opts.headers || {};
+          opts.headers["Authorization"] = "Bearer " + sessionStorage.getItem("access_token");
+        }
+        return _fetch.call(this, url, opts);
+      };
+    })();
+    </script>"""
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head>
+  <title>{title} - API Docs</title>
+  <meta charset="utf-8">
+  <script>
+    if (!sessionStorage.getItem("access_token")) {{
+      window.location.href = "/ui?return_to=" + encodeURIComponent(window.location.pathname);
+    }}
+  </script>
+</head><body>
+{body}
+</body></html>""")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="TTLLM Gateway",
         description="LLM Gateway with Anthropic-compatible API",
         version=__version__,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
 
     app.add_middleware(_SecurityHeadersMiddleware)
@@ -96,6 +151,21 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    # --- Authenticated API docs ---
+    from ttllm.api.deps import get_authenticated
+
+    @app.get("/openapi.json", include_in_schema=False)
+    async def openapi_schema(_: None = Depends(get_authenticated)):
+        return app.openapi()
+
+    @app.get("/docs", include_in_schema=False)
+    async def docs_page():
+        return _authenticated_docs_html("swagger", app.title)
+
+    @app.get("/redoc", include_in_schema=False)
+    async def redoc_page():
+        return _authenticated_docs_html("redoc", app.title)
 
     # Mount self-service UI (static files)
     ui_dir = Path(__file__).resolve().parent.parent / "ui"
