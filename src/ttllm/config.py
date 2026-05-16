@@ -86,6 +86,7 @@ class AuthConfig(BaseModel):
 class ProviderConfig(BaseModel):
     default_region: str = "us-east-1"
     allowed_base_urls: list[str] = []
+    allow_private_targets: bool = False
 
 
 class SecretsConfig(BaseModel):
