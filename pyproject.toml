@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -66,7 +66,11 @@ Repository = "https://github.com/ponquersohn/ttllm-gateway"
 Issues = "https://github.com/ponquersohn/ttllm-gateway/issues"
 
 [tool.hatch.version]
-path = "src/ttllm/__init__.py"
+source = "vcs"
+raw-options = { version_scheme = "no-guess-dev" }
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/ttllm/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ttllm"]

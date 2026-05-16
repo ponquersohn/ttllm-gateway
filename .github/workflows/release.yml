@@ -9,49 +9,15 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  validate-version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.check.outputs.version }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Extract version from tag
-        id: check
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          # Strip leading 'v' if present
-          VERSION="${TAG#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-          # Read version from source
-          CODE_VERSION=$(python3 << 'PYEOF'
-          import pathlib
-          text = pathlib.Path('src/ttllm/__init__.py').read_text()
-          for line in text.splitlines():
-              if line.startswith('__version__'):
-                  print(line.split('=', 1)[1].strip().strip('"').strip("'"))
-                  break
-          PYEOF
-          )
-
-          echo "Tag version:  ${VERSION}"
-          echo "Code version: ${CODE_VERSION}"
-
-          if [ "${VERSION}" != "${CODE_VERSION}" ]; then
-            echo "::error::Version mismatch! Tag=${VERSION} Code=${CODE_VERSION}"
-            echo "::error::Run 'make release' / 'make release-minor' / 'make release-major' to bump the version before tagging."
-            exit 1
-          fi
-
   publish-pypi:
-    needs: validate-version
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -67,13 +33,14 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   build-and-push-docker:
-    needs: validate-version
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - uses: docker/login-action@v4
         with:
@@ -97,3 +64,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
