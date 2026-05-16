@@ -20,6 +20,9 @@ dev:
       secret_key: "env://TTLLM_JWT_SECRET,dev-secret-change-me"
   provider:
     default_region: "us-east-1"
+    allowed_base_urls:
+      - "http://ollama\\..*:11434/v1"
+    allow_private_targets: true
 
 nonprod:
   database:

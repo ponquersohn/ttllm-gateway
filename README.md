@@ -128,6 +128,9 @@ dev:
         client_id: "..."
   provider:
     default_region: "us-east-1"
+    allowed_base_urls:                          # regex patterns for custom base_url targets
+      - "http://ollama\\..*:11434/v1"
+    allow_private_targets: false                # set true to allow private/internal IPs
   secrets:
     encryption_key: "env://TTLLM_SECRETS_ENCRYPTION_KEY"
 ```
@@ -174,6 +177,42 @@ ttllm models create \
 ```
 
 At runtime, `secret://` references are resolved transparently before the provider client is created. Secret values are never exposed through the API or CLI.
+
+## OpenAI-Compatible Providers (Ollama, vLLM, etc.)
+
+Any service exposing an OpenAI-compatible `/v1` endpoint (Ollama, vLLM, LiteLLM, etc.) works with the built-in `openai` provider — no dedicated provider needed.
+
+### Setup
+
+1. Whitelist the target URL and enable private-network access in `config.yaml`:
+
+```yaml
+dev:
+  provider:
+    allowed_base_urls:
+      - "http://ollama\\.mynetwork\\.internal:11434/v1"
+    allow_private_targets: true   # required when the target is on a private network
+```
+
+`allowed_base_urls` entries are regex patterns matched with `re.fullmatch`. Metadata endpoints (169.254.169.254, etc.) are always blocked regardless of `allow_private_targets`.
+
+2. Register the model:
+
+```bash
+ttllm models create \
+  --name llama3-local \
+  --provider openai \
+  --provider-model-id llama3 \
+  --config '{"base_url":"http://ollama.mynetwork.internal:11434/v1","api_key":"unused"}'
+```
+
+3. Assign the model to users/groups as usual:
+
+```bash
+ttllm models assign llama3-local --user alice
+```
+
+Requests to this model are routed through Ollama's OpenAI-compatible API and tracked the same as any other provider.
 
 ## CLI
 

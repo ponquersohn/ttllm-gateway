@@ -35,6 +35,10 @@ def _validate_base_url(url: str) -> None:
         raise ValueError(f"Invalid base_url: {url}")
     if hostname in _BLOCKED_META_HOSTS:
         raise ValueError(f"base_url targets a blocked metadata endpoint")
+
+    if settings.provider.allow_private_targets:
+        return
+
     try:
         addr = ipaddress.ip_address(hostname)
     except ValueError:
