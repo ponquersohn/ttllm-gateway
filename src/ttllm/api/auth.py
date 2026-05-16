@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from urllib.parse import urlparse
 
@@ -107,6 +108,15 @@ async def sso_authorize(idp_slug: str, db: DB, final_redirect: str | None = None
         raise HTTPException(404, detail={"type": "not_found", "message": f"Identity provider '{idp_slug}' not found"})
 
     if final_redirect and not _validate_redirect(final_redirect):
+        logger = logging.getLogger(__name__)
+        parsed = urlparse(final_redirect)
+        target_origin = f"{parsed.scheme}://{parsed.hostname}"
+        if parsed.port:
+            target_origin += f":{parsed.port}"
+        logger.warning(
+            "Rejected final_redirect=%s (origin=%s). allowed_redirect_origins=%r",
+            final_redirect, target_origin, settings.auth.allowed_redirect_origins,
+        )
         raise HTTPException(400, detail={"type": "invalid_request", "message": "final_redirect must point to localhost"})
 
     endpoints = await oidc.discover(idp_config.get_discovery_url())
