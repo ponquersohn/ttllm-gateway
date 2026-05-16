@@ -22,6 +22,7 @@ build/
 .eggs/
 sdist/
 wheels/
+src/ttllm/_version.py
 
 # Virtual environments
 .venv/

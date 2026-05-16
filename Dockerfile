@@ -2,6 +2,9 @@ FROM python:3.12-slim AS base
 
 WORKDIR /app
 
+ARG VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev && \
     rm -rf /var/lib/apt/lists/*
@@ -12,7 +15,7 @@ COPY alembic.ini .
 COPY alembic/ alembic/
 
 COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh && pip install --no-cache-dir -e .
+RUN chmod +x entrypoint.sh && pip install --no-cache-dir .
 
 RUN useradd -r -s /bin/false ttllm
 USER ttllm

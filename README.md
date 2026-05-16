@@ -263,7 +263,7 @@ The overall status is `ok` when all checks pass, or `degraded` when any check re
 
 ## Releasing
 
-Releases are created from the `main` branch. The Makefile bumps the version in `src/ttllm/__init__.py` and shows the commands to complete the release:
+Releases are created from the `main` branch. The version is derived automatically from git tags (via `hatch-vcs`), so no source file needs editing.
 
 ```bash
 make release         # Patch bump (v0.0.1 -> v0.0.2)
@@ -271,11 +271,10 @@ make release-minor   # Minor bump (v0.1.0 -> v0.2.0)
 make release-major   # Major bump (v1.0.0 -> v2.0.0)
 ```
 
-After running `make release*`, follow the printed instructions to commit, tag, push, and create the GitHub release. Publishing a GitHub release triggers the CI workflow to:
+After running `make release*`, follow the printed instructions to push the tag and create the GitHub release. Publishing a GitHub release triggers the CI workflow to:
 
-1. **Validate** that the git tag matches the `__version__` in code
-2. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/)
-3. **Build and push** the Docker image to `ghcr.io/ponquersohn/ttllm-gateway`
+1. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/)
+2. **Build and push** the Docker image to `ghcr.io/ponquersohn/ttllm-gateway`
 
 ## Self-Service Web UI
 
