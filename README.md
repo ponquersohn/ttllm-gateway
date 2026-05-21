@@ -231,6 +231,7 @@ ttllm groups list|show|create|update|delete
 ttllm tokens list|show|create|delete
 ttllm secrets list|show|create|update|delete
 ttllm usage summary|costs [--user] [--model] [--since] [--until]
+ttllm reports generate [--user] [--since] [--until] [--format pdf|html] [-o file]  # preview
 ttllm audit-logs [--user] [--model] [--limit]
 ```
 
