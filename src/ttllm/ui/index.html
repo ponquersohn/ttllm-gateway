@@ -570,7 +570,17 @@ tr:hover td{background:rgba(0,0,0,.015)}
           '# Or launch directly\n' +
           'ANTHROPIC_BASE_URL=' + apiUrl + ' \\\n' +
           'ANTHROPIC_API_KEY=' + token + ' \\\n' +
-          '  claude',
+          '  claude\n\n' +
+          '# Or add to Claude Code settings (.claude/settings.json):\n' +
+          '# {\n' +
+          '#   "env": {\n' +
+          '#     "ANTHROPIC_BASE_URL": "' + apiUrl + '",\n' +
+          '#     "ANTHROPIC_API_KEY": "' + token + '",\n' +
+          '#     "ANTHROPIC_DEFAULT_OPUS_MODEL": "MODEL_NAME",\n' +
+          '#     "ANTHROPIC_DEFAULT_SONNET_MODEL": "MODEL_NAME",\n' +
+          '#     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MODEL_NAME"\n' +
+          '#   }\n' +
+          '# }',
         copyText: 'ANTHROPIC_BASE_URL=' + apiUrl + '\nANTHROPIC_API_KEY=' + token
       },
       "Cursor": {

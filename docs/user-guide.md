@@ -267,8 +267,6 @@ console.log(message.content[0].text);
 ```bash
 export ANTHROPIC_API_KEY="<your-gateway-token>"
 export ANTHROPIC_BASE_URL="https://gateway.example.com/anthropic"
-export ANTHROPIC_MODEL="<one model>"
-export ANTHROPIC_MODEL="<second model>"
 ```
 
 ## 8. Use with Claude Code
@@ -278,23 +276,38 @@ export ANTHROPIC_MODEL="<second model>"
 ```bash
 export ANTHROPIC_API_KEY="<your-gateway-token>"
 export ANTHROPIC_BASE_URL="https://gateway.example.com/anthropic"
-export ANTHROPIC_MODEL="<one model>"
-export ANTHROPIC_MODEL="<second model>"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="<model-for-opus>"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="<model-for-sonnet>"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="<model-for-haiku>"
 
 claude
 ```
 
 Claude Code will route all requests through the gateway using the models available to your account.
-If that works you can probably set the settings in `.claude/settings.local.yaml`
 
-```yaml
+### Model override variables
+
+| Variable | Description |
+|---|---|
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | Model to use for opus (and for Plan Mode) |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model to use for sonnet (and for Plan Mode when not active) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Model to use for haiku and background functionality |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | Model to use for all subagents (overrides per-invocation settings) |
+
+> **Note:** `ANTHROPIC_SMALL_FAST_MODEL` is deprecated in favor of `ANTHROPIC_DEFAULT_HAIKU_MODEL`.
+
+### Persist in settings
+
+Once verified, add the configuration to `.claude/settings.json` (or `.claude/settings.local.json` for personal overrides) using the `"env"` block:
+
+```json
 {
   "env": {
     "ANTHROPIC_API_KEY": "<your-gateway-token>",
     "ANTHROPIC_BASE_URL": "https://gateway.example.com/anthropic",
-    "ANTHROPIC_MODEL": "<one model>",
-    "ANTHROPIC_SMALL_FAST_MODEL": "<second model>",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "<model-for-opus>",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "<model-for-sonnet>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<model-for-haiku>"
   }
 }
 ```

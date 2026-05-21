@@ -47,6 +47,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+reports = [
+    "fpdf2>=2.7",
+]
 dev = [
     "pytest",
     "pytest-asyncio",
