@@ -334,6 +334,7 @@ async def create_model(
         config_json=body.config_json,
         input_cost_per_1k=body.input_cost_per_1k,
         output_cost_per_1k=body.output_cost_per_1k,
+        match_pattern=body.match_pattern,
     )
     await admin_audit_service.log(
         db, actor_id=ctx.user.id, actor_jti=ctx.jti,

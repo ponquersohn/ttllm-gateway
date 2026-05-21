@@ -8,7 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 _SENSITIVE_KEY_PATTERN = re.compile(r"(secret|key|password|token|credential)", re.IGNORECASE)
 _REDACTED = "***REDACTED***"
@@ -69,6 +69,18 @@ class UserResponse(BaseModel):
 # --- Models ---
 
 
+def _validate_match_pattern(v: str | None) -> str | None:
+    if v is None:
+        return None
+    if len(v) > 512:
+        raise ValueError("match_pattern must be at most 512 characters")
+    try:
+        re.compile(v)
+    except re.error as e:
+        raise ValueError(f"match_pattern is not a valid regex: {e}")
+    return v
+
+
 class ModelCreate(BaseModel):
     name: str
     provider: str
@@ -76,6 +88,12 @@ class ModelCreate(BaseModel):
     config_json: dict[str, Any] = {}
     input_cost_per_1k: Decimal = Decimal("0")
     output_cost_per_1k: Decimal = Decimal("0")
+    match_pattern: str | None = None
+
+    @field_validator("match_pattern")
+    @classmethod
+    def check_match_pattern(cls, v: str | None) -> str | None:
+        return _validate_match_pattern(v)
 
 
 class ModelUpdate(BaseModel):
@@ -86,6 +104,12 @@ class ModelUpdate(BaseModel):
     input_cost_per_1k: Decimal | None = None
     output_cost_per_1k: Decimal | None = None
     is_active: bool | None = None
+    match_pattern: str | None = None
+
+    @field_validator("match_pattern")
+    @classmethod
+    def check_match_pattern(cls, v: str | None) -> str | None:
+        return _validate_match_pattern(v)
 
 
 class ModelResponse(BaseModel):
@@ -96,6 +120,7 @@ class ModelResponse(BaseModel):
     config_json: dict[str, Any]
     input_cost_per_1k: Decimal
     output_cost_per_1k: Decimal
+    match_pattern: str | None = None
     is_active: bool
     created_at: datetime
 

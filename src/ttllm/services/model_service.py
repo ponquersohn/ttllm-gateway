@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from decimal import Decimal
 
@@ -20,6 +21,7 @@ async def create_model(
     config_json: dict | None = None,
     input_cost_per_1k: Decimal = Decimal("0"),
     output_cost_per_1k: Decimal = Decimal("0"),
+    match_pattern: str | None = None,
 ) -> LLMModel:
     model = LLMModel(
         name=name,
@@ -28,6 +30,7 @@ async def create_model(
         config_json=config_json or {},
         input_cost_per_1k=input_cost_per_1k,
         output_cost_per_1k=output_cost_per_1k,
+        match_pattern=match_pattern,
     )
     db.add(model)
     await db.commit()
@@ -72,7 +75,7 @@ async def update_model(
     model = await db.get(LLMModel, model_id)
     if not model:
         return None
-    _MUTABLE_FIELDS = {"name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "is_active"}
+    _MUTABLE_FIELDS = {"name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "is_active", "match_pattern"}
     for key, value in kwargs.items():
         if key in _MUTABLE_FIELDS and value is not None:
             setattr(model, key, value)
@@ -160,7 +163,12 @@ async def get_model_for_user(
     user_id: uuid.UUID,
     model_name: str,
 ) -> LLMModel | None:
-    """Get a model by name if the user has access (direct or via group)."""
+    """Get a model by name if the user has access (direct or via group).
+
+    Resolution order:
+    1. Exact name match
+    2. Regex pattern match (fallback via match_pattern column)
+    """
     direct = (
         select(LLMModel.id)
         .join(ModelAssignment, ModelAssignment.model_id == LLMModel.id)
@@ -179,7 +187,20 @@ async def get_model_for_user(
             LLMModel.is_active == True,  # noqa: E712
         )
     )
-    return result.scalar_one_or_none()
+    exact = result.scalar_one_or_none()
+    if exact:
+        return exact
+
+    all_models = await list_user_models(db, user_id)
+    for model in all_models:
+        if not model.match_pattern:
+            continue
+        try:
+            if re.fullmatch(model.match_pattern, model_name):
+                return model
+        except re.error:
+            continue
+    return None
 
 
 async def list_user_models(
