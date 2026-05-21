@@ -17,5 +17,6 @@ class AvailableModelResponse(BaseModel):
     id: uuid.UUID
     name: str
     provider: str
+    match_pattern: str | None = None
 
     model_config = {"from_attributes": True}

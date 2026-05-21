@@ -674,9 +674,10 @@ tr:hover td{background:rgba(0,0,0,.015)}
       modelsWrapper.innerHTML = '<div class="no-data">No models assigned to your account.</div>';
       return;
     }
-    let html = '<table><thead><tr><th>Name</th><th>Provider</th><th>Action</th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th>Name</th><th>Provider</th><th>Match Pattern</th><th>Action</th></tr></thead><tbody>';
     models.forEach(function(m) {
       html += '<tr><td>' + escapeHtml(m.name) + '</td><td>' + escapeHtml(m.provider) + '</td>' +
+        '<td>' + escapeHtml(m.match_pattern || '') + '</td>' +
         '<td><button class="btn btn-secondary" data-chat-model="' + escapeAttr(m.name) + '">Chat</button></td></tr>';
     });
     html += '</tbody></table>';

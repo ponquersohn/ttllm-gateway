@@ -43,6 +43,7 @@ def models_list(
     table.add_column("Name")
     table.add_column("Provider")
     table.add_column("Provider Model ID")
+    table.add_column("Match Pattern")
     table.add_column("Input $/1K")
     table.add_column("Output $/1K")
     table.add_column("Active")
@@ -53,6 +54,7 @@ def models_list(
             m["name"],
             m["provider"],
             m["provider_model_id"],
+            m.get("match_pattern") or "",
             str(m["input_cost_per_1k"]),
             str(m["output_cost_per_1k"]),
             "Yes" if m["is_active"] else "No",
