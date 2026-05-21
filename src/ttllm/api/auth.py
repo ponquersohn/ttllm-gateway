@@ -201,6 +201,15 @@ async def sso_callback(
         for idp_role in idp_roles:
             target_groups.update(idp_config.group_mapping.get(idp_role, []))
 
+    if not target_groups:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "type": "access_denied",
+                "message": "You do not have any roles assigned in your organization. Contact your administrator to request access.",
+            },
+        )
+
     # Compute the full set of groups this IdP can manage
     sso_managed_groups = set(idp_config.default_groups)
     for mapped in idp_config.group_mapping.values():
