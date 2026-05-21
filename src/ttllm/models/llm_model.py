@@ -31,6 +31,7 @@ class LLMModel(Base):
     output_cost_per_1k: Mapped[Decimal] = mapped_column(
         Numeric(10, 6), default=Decimal("0")
     )
+    match_pattern: Mapped[str | None] = mapped_column(String(512), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

@@ -214,6 +214,26 @@ ttllm models assign llama3-local --user alice
 
 Requests to this model are routed through Ollama's OpenAI-compatible API and tracked the same as any other provider.
 
+## Model Name Matching
+
+By default, a request's `model` field must exactly match the `name` of a registered model. For more flexible matching, you can attach a regex pattern to a model via `--match-pattern`:
+
+```bash
+ttllm models create \
+  --name claude-haiku \
+  --provider bedrock \
+  --provider-model-id anthropic.claude-haiku-4-5-20241022-v1:0 \
+  --match-pattern 'claude-haiku-4\.5.*'
+```
+
+Now any request with a model string starting with `claude-haiku-4.5` (e.g. `claude-haiku-4.5-20241022`, `claude-haiku-4.5-latest`) will resolve to this model.
+
+**Rules:**
+- Exact name match always takes priority over regex.
+- Patterns use Python `re.fullmatch` semantics — the entire model string must match.
+- Invalid regex patterns are rejected at creation time.
+- To clear a pattern: `ttllm models update <name> --match-pattern ""`
+
 ## CLI
 
 Admin operations via the `ttllm` CLI:

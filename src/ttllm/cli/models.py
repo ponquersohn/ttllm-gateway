@@ -83,6 +83,8 @@ def models_show(
     console.print(f"  Output cost/1K: {data['output_cost_per_1k']}")
     console.print(f"  Active: {'Yes' if data['is_active'] else 'No'}")
     console.print(f"  Created: {data['created_at'][:10]}")
+    if data.get("match_pattern"):
+        console.print(f"  Match Pattern: {data['match_pattern']}")
     if data.get("config_json"):
         console.print(f"  Config: {json.dumps(data['config_json'])}")
 
@@ -95,23 +97,22 @@ def models_create(
     input_cost: float = typer.Option(0.0, help="Cost per 1K input tokens"),
     output_cost: float = typer.Option(0.0, help="Cost per 1K output tokens"),
     config: Optional[str] = typer.Option(None, help="JSON config string"),
+    match_pattern: Optional[str] = typer.Option(None, "--match-pattern", help="Regex pattern for flexible model name matching"),
 ):
     """Add a new model."""
     config_json = json.loads(config) if config else {}
+    body: dict = {
+        "name": name,
+        "provider": provider,
+        "provider_model_id": provider_model_id,
+        "config_json": config_json,
+        "input_cost_per_1k": str(input_cost),
+        "output_cost_per_1k": str(output_cost),
+    }
+    if match_pattern is not None:
+        body["match_pattern"] = match_pattern
     with get_client() as client:
-        data = handle_response(
-            client.post(
-                "/admin/models",
-                json={
-                    "name": name,
-                    "provider": provider,
-                    "provider_model_id": provider_model_id,
-                    "config_json": config_json,
-                    "input_cost_per_1k": str(input_cost),
-                    "output_cost_per_1k": str(output_cost),
-                },
-            )
-        )
+        data = handle_response(client.post("/admin/models", json=body))
     console.print(f"[green]Model created:[/green] {data['id']}")
     console.print(f"  Name: {data['name']}")
     console.print(f"  Provider: {data['provider']}")
@@ -126,6 +127,7 @@ def models_update(
     config: Optional[str] = typer.Option(None, "--config", help="New JSON config (replaces existing)"),
     input_cost: Optional[float] = typer.Option(None, "--input-cost", help="Cost per 1K input tokens"),
     output_cost: Optional[float] = typer.Option(None, "--output-cost", help="Cost per 1K output tokens"),
+    match_pattern: Optional[str] = typer.Option(None, "--match-pattern", help="Regex pattern (use empty string to clear)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat model argument as UUID"),
 ):
     """Update an existing model."""
@@ -142,6 +144,8 @@ def models_update(
         body["input_cost_per_1k"] = str(input_cost)
     if output_cost is not None:
         body["output_cost_per_1k"] = str(output_cost)
+    if match_pattern is not None:
+        body["match_pattern"] = match_pattern if match_pattern != "" else None
     if not body:
         console.print("[red]Nothing to update. Provide at least one option.[/red]")
         raise typer.Exit(1)
