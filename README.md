@@ -155,6 +155,91 @@ dev:
     encryption_key: "env://TTLLM_SECRETS_ENCRYPTION_KEY"
 ```
 
+## Rules Engine
+
+The gateway includes a rules engine that evaluates incoming requests before model resolution. Rules are evaluated by weight (highest first); the first matching rule's action is applied.
+
+### Config
+
+Add a `rules` section to your YAML config:
+
+```yaml
+dev:
+  rules:
+    - name: reroute-large-to-haiku
+      weight: 50
+      description: "Route large requests to a cheaper model"
+      conditions:
+        logic: and
+        conditions:
+          - type: parameter
+            field: model
+            operator: exact
+            value: "dynamic_model"
+          - type: function
+            field: count_tokens
+            operator: gt
+            value: 50000
+      action:
+        type: reroute
+        target: "claude-haiku"
+
+    - name: block-jailbreak
+      weight: 100
+      conditions:
+        logic: or
+        conditions:
+          - type: content
+            field: messages
+            operator: regex
+            value: "(?i)(ignore previous instructions|DAN mode)"
+      action:
+        type: block
+        message: "Request rejected: content policy violation"
+
+    - name: mask-ssn
+      weight: 80
+      conditions:
+        logic: and
+        conditions:
+          - type: content
+            field: messages
+            operator: regex
+            value: "\\d{3}-\\d{2}-\\d{4}"
+      action:
+        type: rewrite
+        pattern: "\\d{3}-\\d{2}-\\d{4}"
+        replacement: "[SSN-REDACTED]"
+```
+
+### Condition Types
+
+| Type | Field | Description |
+|------|-------|-------------|
+| `parameter` | `model`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stream` | Match on request parameters |
+| `header` | any header name | Match on HTTP headers (case-insensitive) |
+| `content` | `messages` or `system` | Match on message/system text |
+| `function` | `count_tokens`, `message_length`, `keyword_count` | Match on computed values |
+
+### Operators
+
+`exact`, `regex`, `contains`, `in`, `gt`, `lt`, `gte`, `lte`
+
+All conditions support `negate: true` to invert the match.
+
+### Actions
+
+| Action | Fields | Description |
+|--------|--------|-------------|
+| `reroute` | `target` | Change target model name before resolution |
+| `block` | `message` | Reject request with 403 |
+| `allow` | — | Explicitly pass through (skip remaining rules) |
+| `rewrite` | `pattern`, `replacement` | Regex replace in message content |
+
+### Condition Groups
+
+Conditions can be composed with `logic: and` or `logic: or`, and groups can be nested for complex rules.
+
 ## Secrets Management
 
 Provider credentials (AWS keys, API keys, etc.) can be stored encrypted in the database and

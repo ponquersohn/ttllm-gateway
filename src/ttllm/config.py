@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     auth: AuthConfig = AuthConfig()
     provider: ProviderConfig = ProviderConfig()
     secrets: SecretsConfig = SecretsConfig()
+    rules: list[dict] = []
 
 
 # --- YAML ConfigLoader ---

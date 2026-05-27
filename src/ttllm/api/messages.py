@@ -16,11 +16,19 @@ from ttllm.config import settings
 from ttllm.core import gateway
 from ttllm.core.gateway import ServerToolError
 from ttllm.core.permissions import Permissions
+from ttllm.core.rules import ActionType
 from ttllm.schemas.anthropic import MessagesRequest
-from ttllm.services import audit_service, model_service, secret_service
+from ttllm.schemas.rules import RuleSchema
+from ttllm.services import audit_service, model_service, rules_service, secret_service
 
 logger = logging.getLogger(__name__)
 
+# --- Rules engine initialization ---
+_loaded_rules = rules_service.load_rules(
+    [RuleSchema(**r) for r in settings.rules] if settings.rules else []
+)
+
+# Map Bedrock/AWS error codes to Anthropic-compatible error types and HTTP status codes.
 _BEDROCK_ERROR_MAP: dict[str, tuple[int, str]] = {
     "ThrottlingException": (529, "overloaded_error"),
     "ModelTimeoutException": (529, "overloaded_error"),
@@ -99,6 +107,28 @@ async def create_message(
     """Create a message using the Anthropic Messages API format."""
     request_id = uuid.uuid4()
 
+    # Evaluate rules engine
+    if _loaded_rules:
+        rule_ctx = rules_service.build_request_context(
+            request=body,
+            headers={k.lower(): v for k, v in request.headers.items()},
+            user_id=str(ctx.user.id),
+        )
+        outcome = rules_service.evaluate_rules(_loaded_rules, rule_ctx)
+        if outcome:
+            if outcome.action_type == ActionType.BLOCK:
+                raise HTTPException(
+                    status_code=outcome.block_status,
+                    detail={"type": "policy_error", "message": outcome.block_message},
+                )
+            elif outcome.action_type == ActionType.REROUTE:
+                body = body.model_copy(update={"model": outcome.rerouted_model})
+            elif outcome.action_type == ActionType.REWRITE:
+                body = rules_service.apply_rewrite_to_request(
+                    body, outcome.rewrite_pattern, outcome.rewrite_replacement
+                )
+
+    # Check model access
     llm_model = await model_service.get_model_for_user(db, ctx.user.id, body.model)
     if not llm_model:
         raise HTTPException(
