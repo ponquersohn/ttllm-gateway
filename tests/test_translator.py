@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from ttllm.core.translator import (
+    bind_tools_to_model,
+    convert_tool_choice,
     extract_invoke_params,
     from_langchain_response,
     to_langchain_messages,
@@ -15,6 +18,11 @@ from ttllm.schemas.anthropic import (
     Message,
     MessagesRequest,
     TextBlock,
+    ToolChoiceAny,
+    ToolChoiceAuto,
+    ToolChoiceTool,
+    ToolDefinition,
+    ToolInputSchema,
     ToolUseBlock,
 )
 
@@ -167,3 +175,73 @@ class TestFromLangchainResponse:
         assert len(tool_blocks) == 1
         assert tool_blocks[0].name == "search"
         assert response.stop_reason == "tool_use"
+
+
+class TestConvertToolChoice:
+    def test_none(self):
+        assert convert_tool_choice(None) is None
+
+    def test_auto(self):
+        assert convert_tool_choice(ToolChoiceAuto()) == "auto"
+
+    def test_any(self):
+        assert convert_tool_choice(ToolChoiceAny()) == "any"
+
+    def test_specific_tool(self):
+        assert convert_tool_choice(ToolChoiceTool(name="search")) == "search"
+
+
+class TestBindToolsToModel:
+    def test_no_tools_returns_model_unchanged(self):
+        model = MagicMock()
+        result = bind_tools_to_model(model, None, None)
+        assert result is model
+        model.bind_tools.assert_not_called()
+
+    def test_empty_tools_returns_model_unchanged(self):
+        model = MagicMock()
+        result = bind_tools_to_model(model, [], None)
+        assert result is model
+        model.bind_tools.assert_not_called()
+
+    def test_with_tools_calls_bind_tools(self):
+        model = MagicMock()
+        bound = MagicMock()
+        model.bind_tools.return_value = bound
+        tools = [
+            ToolDefinition(
+                name="search",
+                description="Search the web",
+                input_schema=ToolInputSchema(
+                    properties={"q": {"type": "string"}},
+                    required=["q"],
+                ),
+            )
+        ]
+
+        result = bind_tools_to_model(model, tools, ToolChoiceAuto())
+
+        assert result is bound
+        model.bind_tools.assert_called_once()
+        call_args = model.bind_tools.call_args
+        assert len(call_args[0][0]) == 1
+        assert call_args[0][0][0]["name"] == "search"
+        assert call_args[1]["tool_choice"] == "auto"
+
+    def test_with_tools_no_tool_choice(self):
+        model = MagicMock()
+        bound = MagicMock()
+        model.bind_tools.return_value = bound
+        tools = [
+            ToolDefinition(
+                name="calc",
+                description="Calculate",
+                input_schema=ToolInputSchema(),
+            )
+        ]
+
+        result = bind_tools_to_model(model, tools, None)
+
+        assert result is bound
+        call_kwargs = model.bind_tools.call_args[1]
+        assert "tool_choice" not in call_kwargs

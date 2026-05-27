@@ -61,8 +61,9 @@ async def invoke(
     messages = translator.to_langchain_messages(request)
     invoke_params = translator.extract_invoke_params(request)
     chat_model = provider_registry.get_chat_model(llm_model, invoke_params)
+    runnable = translator.bind_tools_to_model(chat_model, request.tools, request.tool_choice)
 
-    result: AIMessage = await chat_model.ainvoke(messages)
+    result: AIMessage = await runnable.ainvoke(messages)
 
     input_tokens, output_tokens = token_tracker.extract_token_counts(result)
     cost = token_tracker.calculate_cost(input_tokens, output_tokens, llm_model)
@@ -95,9 +96,10 @@ async def stream(
     messages = translator.to_langchain_messages(request)
     invoke_params = translator.extract_invoke_params(request)
     chat_model = provider_registry.get_chat_model(llm_model, invoke_params)
+    runnable = translator.bind_tools_to_model(chat_model, request.tools, request.tool_choice)
 
     collector = StreamCollector(llm_model=llm_model)
-    lc_stream = chat_model.astream(messages)
+    lc_stream = runnable.astream(messages)
     token_usage: dict[str, int] = {}
 
     sse_stream = _tracked_stream(
