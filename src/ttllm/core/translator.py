@@ -16,6 +16,9 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from langchain_core.language_models import BaseChatModel
+from langchain_core.runnables import Runnable
+
 from ttllm.schemas.anthropic import (
     ContentBlock,
     ImageBlock,
@@ -23,10 +26,16 @@ from ttllm.schemas.anthropic import (
     MessagesRequest,
     MessagesResponse,
     TextBlock,
+    ToolChoiceAny,
+    ToolChoiceAuto,
+    ToolChoiceTool,
+    ToolDefinition,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
 )
+
+ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool
 
 
 def _convert_content_to_langchain(content: str | list[ContentBlock]) -> str | list[dict]:
@@ -120,6 +129,40 @@ def to_langchain_messages(request: MessagesRequest) -> list[BaseMessage]:
                 msgs.append(AIMessage(content=content))
 
     return msgs
+
+
+def convert_tool_choice(tool_choice: ToolChoice | None) -> str | None:
+    """Convert Anthropic tool_choice to the string format expected by LangChain bind_tools."""
+    if tool_choice is None:
+        return None
+    if isinstance(tool_choice, ToolChoiceAuto):
+        return "auto"
+    if isinstance(tool_choice, ToolChoiceAny):
+        return "any"
+    if isinstance(tool_choice, ToolChoiceTool):
+        return tool_choice.name
+    return None
+
+
+def bind_tools_to_model(
+    chat_model: BaseChatModel,
+    tools: list[ToolDefinition] | None,
+    tool_choice: ToolChoice | None,
+) -> Runnable:
+    """Bind Anthropic-format tools to a LangChain model, returning a Runnable.
+
+    If tools is None or empty, returns the model unchanged.
+    """
+    if not tools:
+        return chat_model
+
+    tool_dicts = [t.model_dump() for t in tools]
+    lc_tool_choice = convert_tool_choice(tool_choice)
+
+    kwargs: dict[str, Any] = {}
+    if lc_tool_choice is not None:
+        kwargs["tool_choice"] = lc_tool_choice
+    return chat_model.bind_tools(tool_dicts, **kwargs)
 
 
 def extract_invoke_params(request: MessagesRequest) -> dict[str, Any]:
