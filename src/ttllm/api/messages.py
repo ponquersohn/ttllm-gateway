@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ttllm.api.deps import AuthContext, DB, _authenticate, get_db, require_permission
 from ttllm.config import settings
 from ttllm.core import gateway
+from ttllm.core.gateway import ServerToolError
 from ttllm.core.permissions import Permissions
 from ttllm.schemas.anthropic import MessagesRequest
 from ttllm.services import audit_service, model_service, secret_service
@@ -126,7 +127,6 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
     try:
         result = await gateway.invoke(body, llm_model, request_id)
 
-        # Write audit log
         await audit_service.log_request(
             db,
             user_id=user.id,
@@ -144,6 +144,11 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
 
         return JSONResponse(content=result.response.model_dump())
 
+    except ServerToolError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail={"type": "not_implemented", "message": str(exc)},
+        )
     except Exception as exc:
         status, error_type, message = _classify_provider_error(exc)
         logger.exception("Invoke failed for request %s (type=%s)", request_id, error_type)
@@ -197,6 +202,11 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
                 "Connection": "keep-alive",
                 "X-Request-Id": str(request_id),
             },
+        )
+    except ServerToolError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail={"type": "not_implemented", "message": str(exc)},
         )
     except Exception as exc:
         status, error_type, message = _classify_provider_error(exc)

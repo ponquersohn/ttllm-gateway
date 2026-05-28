@@ -17,7 +17,26 @@ from langchain_core.messages import AIMessage
 from ttllm.core import token_tracker, translator
 from ttllm.core.provider import registry as provider_registry
 from ttllm.core.streaming import format_sse_stream
-from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse
+from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse, ServerToolDefinition
+
+
+class ServerToolError(Exception):
+    """Raised when a request contains server-side tools that cannot be proxied."""
+
+    pass
+
+
+def _check_server_tools(request: MessagesRequest) -> None:
+    """Raise ServerToolError if request contains server-side tool definitions."""
+    if not request.tools:
+        return
+    server_tools = [t for t in request.tools if isinstance(t, ServerToolDefinition)]
+    if server_tools:
+        tool_types = ", ".join(t.type for t in server_tools)
+        raise ServerToolError(
+            f"Server-side tools ({tool_types}) are not available through this gateway. "
+            "These require direct Anthropic API access."
+        )
 
 
 @dataclass
@@ -46,22 +65,17 @@ async def invoke(
     llm_model: Any,
     request_id: uuid.UUID,
 ) -> InvokeResult:
-    """Execute a non-streaming LLM request.
+    """Execute a non-streaming LLM request."""
+    _check_server_tools(request)
 
-    Args:
-        request: The parsed Anthropic-format request.
-        llm_model: The ORM model with provider info and pricing.
-        request_id: Correlation ID for audit.
-
-    Returns:
-        InvokeResult with the response and tracking metadata.
-    """
     start = time.monotonic()
+
+    client_tools, _ = translator.partition_tools(request.tools)
 
     messages = translator.to_langchain_messages(request)
     invoke_params = translator.extract_invoke_params(request)
     chat_model = provider_registry.get_chat_model(llm_model, invoke_params)
-    runnable = translator.bind_tools_to_model(chat_model, request.tools, request.tool_choice)
+    runnable = translator.bind_tools_to_model(chat_model, client_tools or None, request.tool_choice)
 
     result: AIMessage = await runnable.ainvoke(messages)
 
@@ -87,16 +101,15 @@ async def stream(
     llm_model: Any,
     request_id: uuid.UUID,
 ) -> tuple[AsyncIterator[str], StreamCollector]:
-    """Start a streaming LLM request.
+    """Start a streaming LLM request."""
+    _check_server_tools(request)
 
-    Returns a tuple of (SSE event iterator, StreamCollector).
-    The collector accumulates token counts during streaming and can be
-    read after the stream is exhausted.
-    """
+    client_tools, _ = translator.partition_tools(request.tools)
+
     messages = translator.to_langchain_messages(request)
     invoke_params = translator.extract_invoke_params(request)
     chat_model = provider_registry.get_chat_model(llm_model, invoke_params)
-    runnable = translator.bind_tools_to_model(chat_model, request.tools, request.tool_choice)
+    runnable = translator.bind_tools_to_model(chat_model, client_tools or None, request.tool_choice)
 
     collector = StreamCollector(llm_model=llm_model)
     lc_stream = runnable.astream(messages)
@@ -145,6 +158,5 @@ async def _tracked_stream(
     """Wrap SSE stream and pass collected token counts to the collector."""
     async for event in sse_stream:
         yield event
-    # Store token counts on collector so the API layer can finalize
     collector.input_tokens = token_usage.get("input_tokens", 0)
     collector.output_tokens = token_usage.get("output_tokens", 0)

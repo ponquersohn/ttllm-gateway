@@ -12,14 +12,18 @@ from ttllm.core.translator import (
     convert_tool_choice,
     extract_invoke_params,
     from_langchain_response,
+    partition_tools,
     to_langchain_messages,
 )
 from ttllm.schemas.anthropic import (
     Message,
     MessagesRequest,
+    ServerToolDefinition,
     TextBlock,
+    ThinkingBlock,
     ToolChoiceAny,
     ToolChoiceAuto,
+    ToolChoiceNone,
     ToolChoiceTool,
     ToolDefinition,
     ToolInputSchema,
@@ -245,3 +249,65 @@ class TestBindToolsToModel:
         assert result is bound
         call_kwargs = model.bind_tools.call_args[1]
         assert "tool_choice" not in call_kwargs
+
+
+class TestPartitionTools:
+    def test_separates_client_and_server(self):
+        tools = [
+            ToolDefinition(
+                name="search",
+                description="Search",
+                input_schema=ToolInputSchema(
+                    properties={"q": {"type": "string"}},
+                    required=["q"],
+                ),
+            ),
+            ServerToolDefinition(type="web_search_20250305", name="web_search"),
+            ToolDefinition(
+                name="calc",
+                description="Calculate",
+                input_schema=ToolInputSchema(),
+            ),
+        ]
+        client, server = partition_tools(tools)
+        assert len(client) == 2
+        assert len(server) == 1
+        assert client[0].name == "search"
+        assert client[1].name == "calc"
+        assert server[0].type == "web_search_20250305"
+
+    def test_empty_returns_empty(self):
+        assert partition_tools(None) == ([], [])
+        assert partition_tools([]) == ([], [])
+
+    def test_all_client_tools(self):
+        tools = [
+            ToolDefinition(name="a", input_schema=ToolInputSchema()),
+        ]
+        client, server = partition_tools(tools)
+        assert len(client) == 1
+        assert len(server) == 0
+
+
+class TestToolChoiceNone:
+    def test_none_choice(self):
+        assert convert_tool_choice(ToolChoiceNone()) == "none"
+
+
+class TestThinkingBlockHandling:
+    def test_thinking_in_assistant_content_does_not_crash(self):
+        request = _make_request(
+            messages=[
+                Message(role="user", content="Think about this"),
+                Message(
+                    role="assistant",
+                    content=[
+                        ThinkingBlock(thinking="Let me reason...", signature="sig123"),
+                        TextBlock(text="Here's my answer."),
+                    ],
+                ),
+                Message(role="user", content="Thanks"),
+            ]
+        )
+        msgs = to_langchain_messages(request)
+        assert len(msgs) == 3

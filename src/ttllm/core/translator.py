@@ -21,13 +21,18 @@ from langchain_core.runnables import Runnable
 
 from ttllm.schemas.anthropic import (
     ContentBlock,
+    DocumentBlock,
     ImageBlock,
     Message,
     MessagesRequest,
     MessagesResponse,
+    RedactedThinkingBlock,
+    ServerToolDefinition,
     TextBlock,
+    ThinkingBlock,
     ToolChoiceAny,
     ToolChoiceAuto,
+    ToolChoiceNone,
     ToolChoiceTool,
     ToolDefinition,
     ToolResultBlock,
@@ -35,7 +40,18 @@ from ttllm.schemas.anthropic import (
     Usage,
 )
 
-ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool
+ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool | ToolChoiceNone
+
+
+def partition_tools(
+    tools: list[ToolDefinition | ServerToolDefinition] | None,
+) -> tuple[list[ToolDefinition], list[ServerToolDefinition]]:
+    """Separate client-defined tools from server-side tool declarations."""
+    if not tools:
+        return [], []
+    client_tools = [t for t in tools if isinstance(t, ToolDefinition)]
+    server_tools = [t for t in tools if isinstance(t, ServerToolDefinition)]
+    return client_tools, server_tools
 
 
 def _convert_content_to_langchain(content: str | list[ContentBlock]) -> str | list[dict]:
@@ -54,6 +70,11 @@ def _convert_content_to_langchain(content: str | list[ContentBlock]) -> str | li
                     "url": f"data:{block.source.media_type};base64,{block.source.data}"
                 },
             })
+        elif isinstance(block, DocumentBlock):
+            parts.append({
+                "type": "text",
+                "text": f"[document: {block.title or 'untitled'}]",
+            })
         elif isinstance(block, ToolUseBlock):
             parts.append({
                 "type": "text",
@@ -64,6 +85,8 @@ def _convert_content_to_langchain(content: str | list[ContentBlock]) -> str | li
                 b.text for b in block.content
             )
             parts.append({"type": "text", "text": result_text})
+        elif isinstance(block, (ThinkingBlock, RedactedThinkingBlock)):
+            pass
     return parts
 
 
@@ -71,7 +94,6 @@ def to_langchain_messages(request: MessagesRequest) -> list[BaseMessage]:
     """Convert an Anthropic MessagesRequest into a list of LangChain messages."""
     msgs: list[BaseMessage] = []
 
-    # System message
     if request.system:
         if isinstance(request.system, str):
             msgs.append(SystemMessage(content=request.system))
@@ -79,12 +101,10 @@ def to_langchain_messages(request: MessagesRequest) -> list[BaseMessage]:
             system_text = "\n".join(b.text for b in request.system)
             msgs.append(SystemMessage(content=system_text))
 
-    # Conversation messages
     for msg in request.messages:
         content = _convert_content_to_langchain(msg.content)
 
         if msg.role == "user":
-            # Check if content has tool_result blocks -- those become ToolMessages
             if isinstance(msg.content, list):
                 tool_results = [b for b in msg.content if isinstance(b, ToolResultBlock)]
                 if tool_results:
@@ -96,7 +116,6 @@ def to_langchain_messages(request: MessagesRequest) -> list[BaseMessage]:
                             content=result_content,
                             tool_call_id=tr.tool_use_id,
                         ))
-                    # Also include any non-tool-result content as a HumanMessage
                     non_tool = [b for b in msg.content if not isinstance(b, ToolResultBlock)]
                     if non_tool:
                         msgs.append(HumanMessage(
@@ -106,7 +125,6 @@ def to_langchain_messages(request: MessagesRequest) -> list[BaseMessage]:
             msgs.append(HumanMessage(content=content))
 
         elif msg.role == "assistant":
-            # Check for tool_use blocks
             if isinstance(msg.content, list):
                 tool_calls = []
                 text_parts = []
@@ -135,6 +153,8 @@ def convert_tool_choice(tool_choice: ToolChoice | None) -> str | None:
     """Convert Anthropic tool_choice to the string format expected by LangChain bind_tools."""
     if tool_choice is None:
         return None
+    if isinstance(tool_choice, ToolChoiceNone):
+        return "none"
     if isinstance(tool_choice, ToolChoiceAuto):
         return "auto"
     if isinstance(tool_choice, ToolChoiceAny):
@@ -149,9 +169,10 @@ def bind_tools_to_model(
     tools: list[ToolDefinition] | None,
     tool_choice: ToolChoice | None,
 ) -> Runnable:
-    """Bind Anthropic-format tools to a LangChain model, returning a Runnable.
+    """Bind client-defined tools to a LangChain model, returning a Runnable.
 
-    If tools is None or empty, returns the model unchanged.
+    Only accepts ToolDefinition instances (client tools). Server tools must be
+    filtered out via partition_tools() before calling this function.
     """
     if not tools:
         return chat_model
@@ -189,7 +210,6 @@ def from_langchain_response(
     """Convert a LangChain AIMessage to an Anthropic MessagesResponse."""
     content_blocks: list[ContentBlock] = []
 
-    # Text content
     if isinstance(response.content, str) and response.content:
         content_blocks.append(TextBlock(text=response.content))
     elif isinstance(response.content, list):
@@ -200,7 +220,6 @@ def from_langchain_response(
                 if part.get("type") == "text":
                     content_blocks.append(TextBlock(text=part["text"]))
 
-    # Tool calls
     if hasattr(response, "tool_calls") and response.tool_calls:
         for tc in response.tool_calls:
             content_blocks.append(ToolUseBlock(
@@ -209,13 +228,11 @@ def from_langchain_response(
                 input=tc["args"],
             ))
 
-    # Extract token usage from response metadata
     usage_meta = getattr(response, "usage_metadata", None) or {}
     if isinstance(usage_meta, dict):
         input_tokens = input_tokens or usage_meta.get("input_tokens", 0)
         output_tokens = output_tokens or usage_meta.get("output_tokens", 0)
 
-    # Determine stop reason
     stop_reason = "end_turn"
     finish_reason = getattr(response, "response_metadata", {}).get("finish_reason")
     if finish_reason == "stop":
