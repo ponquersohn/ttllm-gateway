@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Discriminator, Field, Tag
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 
 
 # --- Content blocks ---
@@ -26,6 +26,18 @@ class ImageBlock(BaseModel):
     source: ImageSource
 
 
+class DocumentSource(BaseModel):
+    type: Literal["base64"] = "base64"
+    media_type: str
+    data: str
+
+
+class DocumentBlock(BaseModel):
+    type: Literal["document"] = "document"
+    source: DocumentSource
+    title: str | None = None
+
+
 class ToolUseBlock(BaseModel):
     type: Literal["tool_use"] = "tool_use"
     id: str
@@ -33,11 +45,35 @@ class ToolUseBlock(BaseModel):
     input: dict[str, Any]
 
 
+class ServerToolUseBlock(BaseModel):
+    type: Literal["server_tool_use"] = "server_tool_use"
+    id: str
+    name: str
+    input: dict[str, Any]
+
+
+class WebSearchToolResultBlock(BaseModel):
+    type: Literal["web_search_tool_result"] = "web_search_tool_result"
+    tool_use_id: str
+    content: list[Any] = []
+
+
 class ToolResultBlock(BaseModel):
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
     content: str | list[TextBlock] = ""
     is_error: bool = False
+
+
+class ThinkingBlock(BaseModel):
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: str
+
+
+class RedactedThinkingBlock(BaseModel):
+    type: Literal["redacted_thinking"] = "redacted_thinking"
+    data: str
 
 
 def _get_content_type(v: Any) -> str:
@@ -51,8 +87,13 @@ def _get_content_type(v: Any) -> str:
 ContentBlock = Annotated[
     Annotated[TextBlock, Tag("text")]
     | Annotated[ImageBlock, Tag("image")]
+    | Annotated[DocumentBlock, Tag("document")]
     | Annotated[ToolUseBlock, Tag("tool_use")]
-    | Annotated[ToolResultBlock, Tag("tool_result")],
+    | Annotated[ServerToolUseBlock, Tag("server_tool_use")]
+    | Annotated[WebSearchToolResultBlock, Tag("web_search_tool_result")]
+    | Annotated[ToolResultBlock, Tag("tool_result")]
+    | Annotated[ThinkingBlock, Tag("thinking")]
+    | Annotated[RedactedThinkingBlock, Tag("redacted_thinking")],
     Discriminator(_get_content_type),
 ]
 
@@ -72,20 +113,34 @@ class ToolDefinition(BaseModel):
     input_schema: ToolInputSchema
 
 
+class ServerToolDefinition(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    name: str
+
+
 class ToolChoiceAuto(BaseModel):
     type: Literal["auto"] = "auto"
+    disable_parallel_tool_use: bool | None = None
 
 
 class ToolChoiceAny(BaseModel):
     type: Literal["any"] = "any"
+    disable_parallel_tool_use: bool | None = None
 
 
 class ToolChoiceTool(BaseModel):
     type: Literal["tool"] = "tool"
     name: str
+    disable_parallel_tool_use: bool | None = None
 
 
-ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool
+class ToolChoiceNone(BaseModel):
+    type: Literal["none"] = "none"
+
+
+ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool | ToolChoiceNone
 
 
 # --- Messages ---
@@ -109,13 +164,22 @@ class MessagesRequest(BaseModel):
     stop_sequences: list[str] | None = None
     stream: bool = False
     metadata: dict[str, Any] | None = None
-    tools: list[ToolDefinition] | None = None
+    tools: list[ToolDefinition | ServerToolDefinition] | None = None
     tool_choice: ToolChoice | None = None
+    thinking: dict[str, Any] | None = None
+    service_tier: str | None = None
 
 
 class Usage(BaseModel):
     input_tokens: int
     output_tokens: int
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+
+
+class StopDetails(BaseModel):
+    type: str
+    value: str | None = None
 
 
 class MessagesResponse(BaseModel):
@@ -128,6 +192,7 @@ class MessagesResponse(BaseModel):
     model: str
     stop_reason: str | None = None
     stop_sequence: str | None = None
+    stop_details: StopDetails | None = None
     usage: Usage
 
 
@@ -155,10 +220,20 @@ class InputJsonDelta(BaseModel):
     partial_json: str
 
 
+class ThinkingDelta(BaseModel):
+    type: Literal["thinking_delta"] = "thinking_delta"
+    thinking: str
+
+
+class SignatureDelta(BaseModel):
+    type: Literal["signature_delta"] = "signature_delta"
+    signature: str
+
+
 class StreamEventContentBlockDelta(BaseModel):
     type: Literal["content_block_delta"] = "content_block_delta"
     index: int
-    delta: TextDelta | InputJsonDelta
+    delta: TextDelta | InputJsonDelta | ThinkingDelta | SignatureDelta
 
 
 class StreamEventContentBlockStop(BaseModel):

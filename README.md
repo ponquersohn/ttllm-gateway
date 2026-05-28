@@ -1,6 +1,26 @@
 # TTLLM Gateway
 
-LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing requests through LangChain to any supported provider (Bedrock, OpenAI, etc.). Tracks tokens, costs, and maintains audit trails. Supports user management with per-user model access control.
+LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing requests to any supported provider (Bedrock via direct boto3 Converse API, OpenAI-compatible via LangChain). Tracks tokens, costs, and maintains audit trails. Supports user management with per-user model access control.
+
+## Supported Features
+
+| Feature | Bedrock | OpenAI-compatible |
+|---------|---------|-------------------|
+| Text messages | Yes | Yes |
+| Multi-turn conversations | Yes | Yes |
+| System prompts | Yes | Yes |
+| Streaming (SSE) | Yes | Yes |
+| Tool use (client-defined) | Yes | Yes |
+| Image inputs (base64) | Yes | Yes |
+| Document inputs (PDF) | Yes | No |
+| Extended thinking | Yes | No |
+| Token tracking & cost | Yes | Yes |
+| Cache token reporting | Yes | No |
+| Server-side tools | 501 (not proxied) | 501 (not proxied) |
+
+### Architecture Note
+
+Bedrock requests are handled via direct boto3 `converse()` / `converse_stream()` calls with full Anthropic-to-Bedrock format translation. This eliminates the LangChain translation layer for Bedrock, reducing latency and enabling native support for extended thinking, document inputs, and cache token reporting. OpenAI-compatible providers (Ollama, vLLM, etc.) continue to use LangChain.
 
 ## Quick Start
 

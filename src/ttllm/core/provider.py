@@ -1,6 +1,7 @@
 """LangChain provider registry and model instantiation.
 
-Caches model instances by model ID + config hash to avoid re-creating clients.
+The Bedrock provider is now handled directly via boto3 in bedrock.py.
+This registry serves OpenAI-compatible providers only.
 """
 
 from __future__ import annotations
@@ -106,33 +107,6 @@ def _params_hash(params: dict[str, Any]) -> str:
 # --- Built-in provider factories ---
 
 
-def _bedrock_factory(llm_model: Any, invoke_params: dict[str, Any]) -> BaseChatModel:
-    import boto3
-    from langchain_aws import ChatBedrockConverse
-
-    config = llm_model.config_json or {}
-
-    # Build boto3 session from explicit credentials if provided
-    session_kwargs: dict[str, Any] = {}
-    if config.get("aws_profile"):
-        session_kwargs["profile_name"] = config["aws_profile"]
-    if config.get("aws_access_key_id"):
-        session_kwargs["aws_access_key_id"] = config["aws_access_key_id"]
-        session_kwargs["aws_secret_access_key"] = config.get("aws_secret_access_key", "")
-        if config.get("aws_session_token"):
-            session_kwargs["aws_session_token"] = config["aws_session_token"]
-    session_kwargs["region_name"] = config.get("region", settings.provider.default_region)
-
-    client = boto3.Session(**session_kwargs).client("bedrock-runtime")
-
-    return ChatBedrockConverse(
-        model=llm_model.provider_model_id,
-        client=client,
-        max_tokens=invoke_params.get("max_tokens", 4096),
-        temperature=invoke_params.get("temperature", 1.0),
-    )
-
-
 def _openai_factory(llm_model: Any, invoke_params: dict[str, Any]) -> BaseChatModel:
     from langchain_community.chat_models import ChatOpenAI
 
@@ -149,7 +123,6 @@ def _openai_factory(llm_model: Any, invoke_params: dict[str, Any]) -> BaseChatMo
     )
 
 
-# Global registry with built-in providers
+# Global registry — Bedrock is handled directly in bedrock.py, not via LangChain
 registry = ProviderRegistry()
-registry.register("bedrock", _bedrock_factory)
 registry.register("openai", _openai_factory)

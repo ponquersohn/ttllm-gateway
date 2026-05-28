@@ -21,13 +21,18 @@ from langchain_core.runnables import Runnable
 
 from ttllm.schemas.anthropic import (
     ContentBlock,
+    DocumentBlock,
     ImageBlock,
     Message,
     MessagesRequest,
     MessagesResponse,
+    RedactedThinkingBlock,
+    ServerToolDefinition,
     TextBlock,
+    ThinkingBlock,
     ToolChoiceAny,
     ToolChoiceAuto,
+    ToolChoiceNone,
     ToolChoiceTool,
     ToolDefinition,
     ToolResultBlock,
@@ -35,7 +40,18 @@ from ttllm.schemas.anthropic import (
     Usage,
 )
 
-ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool
+ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool | ToolChoiceNone
+
+
+def partition_tools(
+    tools: list[ToolDefinition | ServerToolDefinition] | None,
+) -> tuple[list[ToolDefinition], list[ServerToolDefinition]]:
+    """Separate client-defined tools from server-side tool declarations."""
+    if not tools:
+        return [], []
+    client_tools = [t for t in tools if isinstance(t, ToolDefinition)]
+    server_tools = [t for t in tools if isinstance(t, ServerToolDefinition)]
+    return client_tools, server_tools
 
 
 def _convert_content_to_langchain(content: str | list[ContentBlock]) -> str | list[dict]:
