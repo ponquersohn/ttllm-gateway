@@ -18,15 +18,9 @@ from ttllm.core.gateway import ServerToolError
 from ttllm.core.permissions import Permissions
 from ttllm.core.rules import ActionType
 from ttllm.schemas.anthropic import MessagesRequest
-from ttllm.schemas.rules import RuleSchema
 from ttllm.services import audit_service, model_service, rules_service, secret_service
 
 logger = logging.getLogger(__name__)
-
-# --- Rules engine initialization ---
-_loaded_rules = rules_service.load_rules(
-    [RuleSchema(**r) for r in settings.rules] if settings.rules else []
-)
 
 # Map Bedrock/AWS error codes to Anthropic-compatible error types and HTTP status codes.
 _BEDROCK_ERROR_MAP: dict[str, tuple[int, str]] = {
@@ -108,13 +102,14 @@ async def create_message(
     request_id = uuid.uuid4()
 
     # Evaluate rules engine
-    if _loaded_rules:
+    active_rules = await rules_service.get_active_rules(db)
+    if active_rules:
         rule_ctx = rules_service.build_request_context(
             request=body,
             headers={k.lower(): v for k, v in request.headers.items()},
             user_id=str(ctx.user.id),
         )
-        outcome = rules_service.evaluate_rules(_loaded_rules, rule_ctx)
+        outcome = rules_service.evaluate_rules(active_rules, rule_ctx)
         if outcome:
             if outcome.action_type == ActionType.BLOCK:
                 raise HTTPException(

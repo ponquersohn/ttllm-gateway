@@ -13,14 +13,15 @@ from ttllm.core.rules import (
     LogicOp,
     MatchOp,
     RequestContext,
-    Rule,
     RuleOutcome,
+    Rule,
     apply_action,
     evaluate,
     evaluate_condition,
     evaluate_group,
 )
 from ttllm.schemas.anthropic import Message, MessagesRequest
+from ttllm.schemas.admin import RuleCreate, RuleUpdate, RuleResponse
 from ttllm.schemas.rules import (
     BlockActionSchema,
     ConditionGroupSchema,
@@ -30,10 +31,13 @@ from ttllm.schemas.rules import (
     RuleSchema,
 )
 from ttllm.services.rules_service import (
+    _convert_action_dict,
+    _convert_condition_group_dict,
+    _db_rule_to_core,
     apply_rewrite_to_request,
     build_request_context,
     evaluate_rules,
-    load_rules,
+    invalidate_rules_cache,
 )
 
 
@@ -249,30 +253,68 @@ class TestActions:
         assert outcome.rewrite_pattern == r"\d{3}-\d{2}-\d{4}"
 
 
-# --- Service layer ---
+# --- Service layer: dict conversion (simulates DB JSONB) ---
 
 
-class TestRulesService:
-    def test_load_rules_from_schema(self):
-        schemas = [
-            RuleSchema(
-                name="test-rule",
-                weight=50,
-                conditions=ConditionGroupSchema(
-                    logic="and",
-                    conditions=[
-                        ConditionSchema(type="parameter", field="model", operator="exact", value="dynamic_model"),
+class TestDictConversion:
+    def test_convert_condition_group_dict(self):
+        data = {
+            "logic": "and",
+            "conditions": [
+                {"type": "parameter", "field": "model", "operator": "exact", "value": "dynamic_model"},
+                {"type": "function", "field": "count_tokens", "operator": "gt", "value": 10000},
+            ],
+        }
+        group = _convert_condition_group_dict(data)
+        assert group.logic == LogicOp.AND
+        assert len(group.conditions) == 2
+        assert group.conditions[0].type == ConditionType.PARAMETER
+
+    def test_convert_nested_condition_group(self):
+        data = {
+            "logic": "or",
+            "conditions": [
+                {"type": "header", "field": "x-test", "operator": "exact", "value": "yes"},
+                {
+                    "logic": "and",
+                    "conditions": [
+                        {"type": "parameter", "field": "model", "operator": "regex", "value": "claude.*"},
                     ],
-                ),
-                action=RerouteActionSchema(target="claude-haiku"),
-            ),
-        ]
-        rules = load_rules(schemas)
-        assert len(rules) == 1
-        assert rules[0].name == "test-rule"
-        assert rules[0].weight == 50
-        assert rules[0].action.type == ActionType.REROUTE
+                },
+            ],
+        }
+        group = _convert_condition_group_dict(data)
+        assert group.logic == LogicOp.OR
+        assert isinstance(group.conditions[1], ConditionGroup)
 
+    def test_convert_reroute_action(self):
+        data = {"type": "reroute", "target": "claude-haiku"}
+        action = _convert_action_dict(data)
+        assert action.type == ActionType.REROUTE
+        assert action.target == "claude-haiku"
+
+    def test_convert_block_action(self):
+        data = {"type": "block", "message": "Denied"}
+        action = _convert_action_dict(data)
+        assert action.type == ActionType.BLOCK
+        assert action.target == "Denied"
+
+    def test_convert_rewrite_action(self):
+        data = {"type": "rewrite", "pattern": r"\d+", "replacement": "[NUM]"}
+        action = _convert_action_dict(data)
+        assert action.type == ActionType.REWRITE
+        assert action.pattern == r"\d+"
+
+    def test_convert_allow_action(self):
+        data = {"type": "allow"}
+        action = _convert_action_dict(data)
+        assert action.type == ActionType.ALLOW
+
+
+# --- Service layer: evaluation helpers ---
+
+
+class TestServiceHelpers:
     def test_build_request_context(self):
         request = MessagesRequest(
             model="test-model",
@@ -287,20 +329,17 @@ class TestRulesService:
         assert ctx.max_tokens == 512
 
     def test_evaluate_rules_reroute(self):
-        schemas = [
-            RuleSchema(
-                name="reroute-big",
-                weight=10,
-                conditions=ConditionGroupSchema(
-                    logic="and",
-                    conditions=[
-                        ConditionSchema(type="parameter", field="model", operator="exact", value="dynamic_model"),
-                    ],
+        rules = [Rule(
+            name="reroute-big",
+            weight=10,
+            conditions=ConditionGroup(
+                logic=LogicOp.AND,
+                conditions=(
+                    Condition(type=ConditionType.PARAMETER, field="model", operator=MatchOp.EXACT, value="dynamic_model"),
                 ),
-                action=RerouteActionSchema(target="claude-haiku"),
             ),
-        ]
-        rules = load_rules(schemas)
+            action=Action(type=ActionType.REROUTE, target="claude-haiku"),
+        )]
         ctx = _ctx(model="dynamic_model")
         outcome = evaluate_rules(rules, ctx)
         assert outcome is not None
@@ -318,49 +357,65 @@ class TestRulesService:
         assert "[SSN-REDACTED]" in str(result.messages[0].content)
 
     def test_evaluate_rules_no_match(self):
-        schemas = [
-            RuleSchema(
-                name="miss",
-                weight=10,
-                conditions=ConditionGroupSchema(
-                    logic="and",
-                    conditions=[
-                        ConditionSchema(type="parameter", field="model", operator="exact", value="nonexistent"),
-                    ],
+        rules = [Rule(
+            name="miss",
+            weight=10,
+            conditions=ConditionGroup(
+                logic=LogicOp.AND,
+                conditions=(
+                    Condition(type=ConditionType.PARAMETER, field="model", operator=MatchOp.EXACT, value="nonexistent"),
                 ),
-                action=BlockActionSchema(message="blocked"),
             ),
-        ]
-        rules = load_rules(schemas)
+            action=Action(type=ActionType.BLOCK, target="blocked"),
+        )]
         ctx = _ctx(model="claude-sonnet")
         assert evaluate_rules(rules, ctx) is None
 
+    def test_cache_invalidation(self):
+        from ttllm.services.rules_service import _rules_cache
+        _rules_cache.append(_rule())
+        assert len(_rules_cache) == 1
+        invalidate_rules_cache()
+        assert len(_rules_cache) == 0
 
-# --- YAML config round-trip ---
+
+# --- Admin schema validation ---
 
 
-class TestConfigSchemas:
-    def test_reroute_schema(self):
-        schema = RuleSchema(
-            name="dynamic-routing",
-            weight=50,
-            description="Route dynamic_model based on token count",
-            conditions=ConditionGroupSchema(
-                logic="and",
-                conditions=[
-                    ConditionSchema(type="parameter", field="model", operator="exact", value="dynamic_model"),
-                    ConditionSchema(type="function", field="count_tokens", operator="gt", value=10000),
-                ],
-            ),
-            action=RerouteActionSchema(target="claude-haiku"),
+class TestAdminSchemas:
+    def test_rule_create_validates_conditions(self):
+        rule = RuleCreate(
+            name="test",
+            conditions={"logic": "and", "conditions": [{"type": "parameter", "field": "model", "operator": "exact", "value": "x"}]},
+            action={"type": "block", "message": "no"},
         )
-        assert schema.action.type == "reroute"
-        assert schema.action.target == "claude-haiku"
+        assert rule.name == "test"
 
-    def test_rewrite_schema_validates_regex(self):
+    def test_rule_create_rejects_invalid_conditions(self):
         with pytest.raises(Exception):
-            RewriteActionSchema(pattern="[invalid", replacement="x")
+            RuleCreate(
+                name="test",
+                conditions={"logic": "invalid", "conditions": []},
+                action={"type": "block"},
+            )
 
-    def test_block_schema_default_message(self):
-        schema = BlockActionSchema()
-        assert schema.message == "Request blocked by policy"
+    def test_rule_create_rejects_invalid_action(self):
+        with pytest.raises(Exception):
+            RuleCreate(
+                name="test",
+                conditions={"logic": "and", "conditions": [{"type": "parameter", "field": "model", "operator": "exact", "value": "x"}]},
+                action={"type": "unknown_action"},
+            )
+
+    def test_rule_create_validates_rewrite_regex(self):
+        with pytest.raises(Exception):
+            RuleCreate(
+                name="test",
+                conditions={"logic": "and", "conditions": [{"type": "parameter", "field": "model", "operator": "exact", "value": "x"}]},
+                action={"type": "rewrite", "pattern": "[invalid", "replacement": "x"},
+            )
+
+    def test_rule_update_partial(self):
+        update = RuleUpdate(weight=99)
+        dumped = update.model_dump(exclude_unset=True)
+        assert dumped == {"weight": 99}

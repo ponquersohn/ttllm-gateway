@@ -22,6 +22,9 @@ from ttllm.schemas.admin import (
     ModelCreate,
     ModelResponse,
     ModelUpdate,
+    RuleCreate,
+    RuleResponse,
+    RuleUpdate,
     SecretCreate,
     SecretResponse,
     SecretUpdate,
@@ -45,7 +48,7 @@ from ttllm.schemas.auth import (
     UserPermissionAssign,
 )
 from ttllm.schemas.common import PaginatedResponse
-from ttllm.services import admin_audit_service, audit_service, auth_service, group_service, model_service, secret_service, usage_service, user_service
+from ttllm.services import admin_audit_service, audit_service, auth_service, group_service, model_service, rules_service, secret_service, usage_service, user_service
 from ttllm.api.me import _build_whoami
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -875,3 +878,104 @@ async def get_audit_log_body(
             detail={"type": "not_found", "message": "Audit log body not found"},
         )
     return AuditLogBodyResponse.model_validate(body)
+
+
+# --- Rules ---
+
+
+@router.get("/rules", response_model=PaginatedResponse[RuleResponse])
+async def list_rules(
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.RULE_VIEW)),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    rules, total = await rules_service.list_rules(db, offset=offset, limit=limit)
+    return PaginatedResponse(
+        items=[RuleResponse.model_validate(r) for r in rules],
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post("/rules", response_model=RuleResponse, status_code=201)
+async def create_rule(
+    body: RuleCreate,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.RULE_CREATE)),
+):
+    rule = await rules_service.create_rule(
+        db,
+        name=body.name,
+        conditions=body.conditions,
+        action=body.action,
+        description=body.description,
+        weight=body.weight,
+        enabled=body.enabled,
+    )
+    await admin_audit_service.log(
+        db,
+        actor_id=ctx.user.id,
+        actor_jti=ctx.jti,
+        action="rule.create",
+        resource_type="rule",
+        resource_id=rule.id,
+        details={"name": body.name},
+    )
+    return RuleResponse.model_validate(rule)
+
+
+@router.get("/rules/{rule_id}", response_model=RuleResponse)
+async def get_rule(
+    rule_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.RULE_VIEW)),
+):
+    rule = await rules_service.get_rule(db, rule_id)
+    if not rule:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Rule not found"})
+    return RuleResponse.model_validate(rule)
+
+
+@router.patch("/rules/{rule_id}", response_model=RuleResponse)
+async def update_rule(
+    rule_id: uuid.UUID,
+    body: RuleUpdate,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.RULE_MODIFY)),
+):
+    rule = await rules_service.update_rule(
+        db, rule_id, **body.model_dump(exclude_unset=True)
+    )
+    if not rule:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Rule not found"})
+    await admin_audit_service.log(
+        db,
+        actor_id=ctx.user.id,
+        actor_jti=ctx.jti,
+        action="rule.update",
+        resource_type="rule",
+        resource_id=rule_id,
+        details={"fields": list(body.model_dump(exclude_unset=True).keys())},
+    )
+    return RuleResponse.model_validate(rule)
+
+
+@router.delete("/rules/{rule_id}", status_code=204)
+async def delete_rule(
+    rule_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.RULE_DELETE)),
+):
+    deleted = await rules_service.delete_rule(db, rule_id)
+    if not deleted:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Rule not found"})
+    await admin_audit_service.log(
+        db,
+        actor_id=ctx.user.id,
+        actor_jti=ctx.jti,
+        action="rule.delete",
+        resource_type="rule",
+        resource_id=rule_id,
+    )

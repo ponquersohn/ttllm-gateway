@@ -159,57 +159,89 @@ dev:
 
 The gateway includes a rules engine that evaluates incoming requests before model resolution. Rules are evaluated by weight (highest first); the first matching rule's action is applied.
 
-### Config
+Rules are managed via the admin API (`/admin/rules`) and CLI (`ttllm rules`). They are cached in memory and automatically reloaded when created, updated, or deleted.
 
-Add a `rules` section to your YAML config:
+### Permissions
 
-```yaml
-dev:
-  rules:
-    - name: reroute-large-to-haiku
-      weight: 50
-      description: "Route large requests to a cheaper model"
-      conditions:
-        logic: and
-        conditions:
-          - type: parameter
-            field: model
-            operator: exact
-            value: "dynamic_model"
-          - type: function
-            field: count_tokens
-            operator: gt
-            value: 50000
-      action:
-        type: reroute
-        target: "claude-haiku"
+Rules management requires dedicated permissions:
 
-    - name: block-jailbreak
-      weight: 100
-      conditions:
-        logic: or
-        conditions:
-          - type: content
-            field: messages
-            operator: regex
-            value: "(?i)(ignore previous instructions|DAN mode)"
-      action:
-        type: block
-        message: "Request rejected: content policy violation"
+- `rule.view` — List and show rules
+- `rule.create` — Create new rules
+- `rule.modify` — Update existing rules
+- `rule.delete` — Delete rules
 
-    - name: mask-ssn
-      weight: 80
-      conditions:
-        logic: and
-        conditions:
-          - type: content
-            field: messages
-            operator: regex
-            value: "\\d{3}-\\d{2}-\\d{4}"
-      action:
-        type: rewrite
-        pattern: "\\d{3}-\\d{2}-\\d{4}"
-        replacement: "[SSN-REDACTED]"
+### API
+
+```bash
+# List rules
+GET /admin/rules
+
+# Create a rule
+POST /admin/rules
+
+# Get/update/delete a specific rule
+GET    /admin/rules/{rule_id}
+PATCH  /admin/rules/{rule_id}
+DELETE /admin/rules/{rule_id}
+```
+
+### CLI
+
+```bash
+ttllm rules list
+ttllm rules show <name>
+ttllm rules create --name <name> --conditions '<json>' --action '<json>' --weight 50
+ttllm rules update <name> --weight 100 --enabled true
+ttllm rules delete <name>
+```
+
+### Example: Create a rule via API
+
+```json
+POST /admin/rules
+{
+  "name": "reroute-large-to-haiku",
+  "weight": 50,
+  "description": "Route large requests to a cheaper model",
+  "conditions": {
+    "logic": "and",
+    "conditions": [
+      {"type": "parameter", "field": "model", "operator": "exact", "value": "dynamic_model"},
+      {"type": "function", "field": "count_tokens", "operator": "gt", "value": 50000}
+    ]
+  },
+  "action": {"type": "reroute", "target": "claude-haiku"}
+}
+```
+
+**More examples:**
+
+```json
+// Block jailbreak attempts (weight: 100 = high priority)
+{
+  "name": "block-jailbreak",
+  "weight": 100,
+  "conditions": {
+    "logic": "or",
+    "conditions": [
+      {"type": "content", "field": "messages", "operator": "regex", "value": "(?i)(ignore previous instructions|DAN mode)"}
+    ]
+  },
+  "action": {"type": "block", "message": "Request rejected: content policy violation"}
+}
+
+// Mask SSN patterns in content
+{
+  "name": "mask-ssn",
+  "weight": 80,
+  "conditions": {
+    "logic": "and",
+    "conditions": [
+      {"type": "content", "field": "messages", "operator": "regex", "value": "\\d{3}-\\d{2}-\\d{4}"}
+    ]
+  },
+  "action": {"type": "rewrite", "pattern": "\\d{3}-\\d{2}-\\d{4}", "replacement": "[SSN-REDACTED]"}
+}
 ```
 
 ### Condition Types

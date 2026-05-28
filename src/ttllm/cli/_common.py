@@ -83,3 +83,14 @@ def resolve_secret(client: httpx.Client, name: str) -> str:
             return s["id"]
     console.print(f"[red]Secret not found: {name}[/red]")
     raise typer.Exit(1)
+
+
+def resolve_rule(client: httpx.Client, name: str) -> str:
+    """Resolve a rule name to a rule ID."""
+    data = handle_response(client.get("/admin/rules", params={"limit": 200}))
+    needle = name.lower()
+    for r in data["items"]:
+        if r["name"].lower() == needle:
+            return r["id"]
+    console.print(f"[red]Rule not found: {name}[/red]")
+    raise typer.Exit(1)
