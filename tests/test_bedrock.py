@@ -426,6 +426,39 @@ class TestInvokeConverse:
         mock_client.converse.assert_called_once()
 
 
+class TestGetBoto3Client:
+    def test_endpoint_url_passed_to_client(self):
+        from ttllm.core import bedrock
+
+        bedrock._CLIENT_CACHE.clear()
+        model = _make_model(config_json={
+            "region": "us-east-1",
+            "endpoint_url": "http://fake-bedrock:9099",
+            "aws_access_key_id": "test",
+            "aws_secret_access_key": "test",
+        })
+
+        with patch("ttllm.core.bedrock.boto3.Session") as mock_session:
+            bedrock.get_boto3_client(model)
+
+        mock_session.return_value.client.assert_called_once()
+        args, kwargs = mock_session.return_value.client.call_args
+        assert args[0] == "bedrock-runtime"
+        assert kwargs["endpoint_url"] == "http://fake-bedrock:9099"
+
+    def test_no_endpoint_url_omits_kwarg(self):
+        from ttllm.core import bedrock
+
+        bedrock._CLIENT_CACHE.clear()
+        model = _make_model(config_json={"region": "us-east-1"})
+
+        with patch("ttllm.core.bedrock.boto3.Session") as mock_session:
+            bedrock.get_boto3_client(model)
+
+        _, kwargs = mock_session.return_value.client.call_args
+        assert "endpoint_url" not in kwargs
+
+
 class TestToolChoice:
     def test_tool_choice_none_omits_tool_config(self):
         tools = [ToolDefinition(name="search", description="", input_schema=ToolInputSchema())]

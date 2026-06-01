@@ -42,7 +42,10 @@ _BEDROCK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="bedro
 
 def get_boto3_client(llm_model: Any) -> Any:
     config = llm_model.config_json or {}
-    cache_key = f"{config.get('aws_profile', '')}:{config.get('aws_access_key_id', '')}:{config.get('region', '')}"
+    cache_key = (
+        f"{config.get('aws_profile', '')}:{config.get('aws_access_key_id', '')}:"
+        f"{config.get('region', '')}:{config.get('endpoint_url', '')}"
+    )
 
     if cache_key in _CLIENT_CACHE:
         _CLIENT_CACHE.move_to_end(cache_key)
@@ -58,7 +61,13 @@ def get_boto3_client(llm_model: Any) -> Any:
             session_kwargs["aws_session_token"] = config["aws_session_token"]
     session_kwargs["region_name"] = config.get("region", settings.provider.default_region)
 
-    client = boto3.Session(**session_kwargs).client("bedrock-runtime")
+    # endpoint_url lets the client target a non-default endpoint (VPC interface
+    # endpoint, LocalStack, or a test double). Omitted → boto3 uses the AWS default.
+    client_kwargs: dict[str, Any] = {}
+    if config.get("endpoint_url"):
+        client_kwargs["endpoint_url"] = config["endpoint_url"]
+
+    client = boto3.Session(**session_kwargs).client("bedrock-runtime", **client_kwargs)
 
     if len(_CLIENT_CACHE) >= _CLIENT_CACHE_MAX:
         _CLIENT_CACHE.popitem(last=False)

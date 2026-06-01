@@ -274,6 +274,22 @@ ttllm models create \
 
 All four are also accepted by `ttllm models update` with the same flags.
 
+## Bedrock Model Config
+
+Bedrock models accept these keys in `config_json` (all optional):
+
+- `region` — AWS region; falls back to `provider.default_region`.
+- `aws_profile` — named profile, or `aws_access_key_id` / `aws_secret_access_key` / `aws_session_token` for explicit credentials (use `secret://` references for the secret values).
+- `endpoint_url` — override the Bedrock runtime endpoint. Useful for VPC interface endpoints, LocalStack, or pointing tests at a fake Bedrock server. Omit to use the AWS default endpoint for the region.
+
+```bash
+ttllm models create \
+  --name claude-sonnet \
+  --provider bedrock \
+  --provider-model-id anthropic.claude-sonnet-4-20250514-v1:0 \
+  --config '{"region":"us-east-1","endpoint_url":"https://bedrock-runtime.us-east-1.amazonaws.com"}'
+```
+
 ## CLI
 
 Admin operations via the `ttllm` CLI:
@@ -324,7 +340,7 @@ The overall status is `ok` when all checks pass, or `degraded` when any check re
 
 ## Releasing
 
-Releases are created from the `main` branch. The version is derived automatically from git tags (via `hatch-vcs`), so no source file needs editing.
+Releases must be cut from reviewed code: the released commit has to be on `main` or a `release/*` branch. Both are protected (a reviewed PR is required to land code), and the release workflow verifies this before publishing — a release whose commit is not contained in one of those branches fails the publish job. The version is derived automatically from git tags (via `hatch-vcs`), so no source file needs editing.
 
 ```bash
 make release         # Patch bump (v0.0.1 -> v0.0.2)
@@ -334,7 +350,7 @@ make release-major   # Major bump (v1.0.0 -> v2.0.0)
 
 After running `make release*`, follow the printed instructions to push the tag and create the GitHub release. Publishing a GitHub release triggers the CI workflow to:
 
-1. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/)
+1. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/) (only if the release commit is on `main` or a `release/*` branch)
 2. **Build and push** the Docker image to `ghcr.io/ponquersohn/ttllm-gateway`
 
 ## Self-Service Web UI
@@ -365,5 +381,23 @@ For end-user documentation covering login, token creation, API usage, SDK integr
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest                       # unit tests (integration tests are excluded by default)
 ```
+
+### Integration tests
+
+End-to-end tests run the real gateway + PostgreSQL + a fake Bedrock server (which speaks the
+actual boto3 `converse` / `converse_stream` wire protocol, including AWS event-stream framing)
+via docker-compose, then exercise the full flow: create user → create model → assign → mint
+token → `POST /v1/messages` (streaming and non-streaming).
+
+```bash
+docker compose -f docker-compose.integration.yml up -d --build
+pytest tests/integration -m integration     # hits http://localhost:8000
+docker compose -f docker-compose.integration.yml down -v
+```
+
+The fake Bedrock is reached by the gateway at its compose-internal URL
+(`http://fake-bedrock:9099`), configured per-model via `config_json.endpoint_url` (see below).
+If host port 8000 is busy, set `TTLLM_HOST_PORT` and point the tests at it with
+`TTLLM_TEST_BASE_URL`. These tests also run automatically in CI (`.github/workflows/integration.yml`).

@@ -19,6 +19,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Only publish releases cut from reviewed code. The release commit must be
+      # contained in `main` or a `release/*` branch (both protected, requiring a
+      # reviewed PR to land code). This guard runs from the workflow file on the
+      # default branch, so a collaborator cannot bypass it by editing the tag.
+      - name: Verify release commit is on a protected branch
+        run: |
+          git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/release/*:refs/remotes/origin/release/*'
+          branches=$(git branch -r --contains "$GITHUB_SHA" \
+            'origin/main' 'origin/release/*' 2>/dev/null)
+          if [ -z "$branches" ]; then
+            echo "::error::Release commit $GITHUB_SHA is not contained in 'main'" \
+              "or any 'release/*' branch. Releases must be cut from reviewed code."
+            exit 1
+          fi
+          echo "Release commit found on:"
+          echo "$branches"
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"

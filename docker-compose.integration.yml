@@ -1,0 +1,49 @@
+# Integration test stack: Postgres + a fake Bedrock + the real gateway.
+#
+#   docker compose -f docker-compose.integration.yml up -d --build
+#   pytest tests/integration -m integration        # from the host, hits localhost:8000
+#   docker compose -f docker-compose.integration.yml down -v
+#
+# The gateway reaches the fake Bedrock at the compose-internal URL http://fake-bedrock:9099
+# (set per-model via config_json.endpoint_url in the test fixtures). The host test runner
+# reaches the gateway at http://localhost:8000.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ttllm
+      POSTGRES_USER: ttllm
+      POSTGRES_PASSWORD: dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ttllm"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  fake-bedrock:
+    build:
+      context: .
+      dockerfile: tests/integration/fake_bedrock/Dockerfile
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9099/').status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build:
+      context: .
+      args:
+        VERSION: "0.0.0"
+    ports:
+      - "${TTLLM_HOST_PORT:-8000}:8000"
+    environment:
+      TTLLM_DATABASE__URL: postgresql+asyncpg://ttllm:dev@db:5432/ttllm
+      TTLLM_AUTH__JWT__SECRET_KEY: integration-test-secret
+      TTLLM_ADMIN_PASSWORD: admin
+      TTLLM_PROVIDER__DEFAULT_REGION: us-east-1
+    depends_on:
+      db:
+        condition: service_healthy
+      fake-bedrock:
+        condition: service_healthy
