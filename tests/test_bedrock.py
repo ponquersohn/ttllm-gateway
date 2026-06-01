@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -18,10 +19,14 @@ from ttllm.schemas.anthropic import (
     ImageSource,
     Message,
     MessagesRequest,
+    RedactedThinkingBlock,
     ServerToolDefinition,
+    ServerToolUseBlock,
     TextBlock,
     ThinkingBlock,
+    ToolChoiceAny,
     ToolChoiceAuto,
+    ToolChoiceNone,
     ToolDefinition,
     ToolInputSchema,
     ToolResultBlock,
@@ -260,8 +265,10 @@ class TestParseConverseResponse:
             "usage": {"inputTokens": 10, "outputTokens": 5},
         }
         request_id = uuid.uuid4()
-        result = parse_converse_response(response, "claude-sonnet", request_id)
+        result, cache_read, cache_write = parse_converse_response(response, "claude-sonnet", request_id)
 
+        assert cache_read == 0
+        assert cache_write == 0
         assert result.id == f"msg_{request_id.hex[:24]}"
         assert result.model == "claude-sonnet"
         assert result.stop_reason == "end_turn"
@@ -285,7 +292,7 @@ class TestParseConverseResponse:
             "usage": {"inputTokens": 20, "outputTokens": 15},
         }
         request_id = uuid.uuid4()
-        result = parse_converse_response(response, "claude-sonnet", request_id)
+        result, _, _ = parse_converse_response(response, "claude-sonnet", request_id)
 
         assert result.stop_reason == "tool_use"
         assert len(result.content) == 2
@@ -308,7 +315,7 @@ class TestParseConverseResponse:
             "usage": {"inputTokens": 30, "outputTokens": 50},
         }
         request_id = uuid.uuid4()
-        result = parse_converse_response(response, "claude-sonnet", request_id)
+        result, _, _ = parse_converse_response(response, "claude-sonnet", request_id)
 
         assert len(result.content) == 2
         assert result.content[0].type == "thinking"
@@ -328,12 +335,15 @@ class TestParseConverseResponse:
             },
         }
         request_id = uuid.uuid4()
-        result = parse_converse_response(response, "claude-sonnet", request_id)
+        result, cache_read, cache_write = parse_converse_response(response, "claude-sonnet", request_id)
 
-        assert result.usage.input_tokens == 150
+        # cache_read is reported separately, NOT folded into billed input_tokens.
+        assert result.usage.input_tokens == 100
         assert result.usage.output_tokens == 20
         assert result.usage.cache_read_input_tokens == 50
         assert result.usage.cache_creation_input_tokens == 30
+        assert cache_read == 50
+        assert cache_write == 30
 
     def test_max_tokens_stop_reason(self):
         response = {
@@ -342,7 +352,7 @@ class TestParseConverseResponse:
             "usage": {"inputTokens": 10, "outputTokens": 4096},
         }
         request_id = uuid.uuid4()
-        result = parse_converse_response(response, "claude-sonnet", request_id)
+        result, _, _ = parse_converse_response(response, "claude-sonnet", request_id)
 
         assert result.stop_reason == "max_tokens"
 
@@ -353,7 +363,7 @@ class TestParseConverseResponse:
             "usage": {"inputTokens": 5, "outputTokens": 0},
         }
         request_id = uuid.uuid4()
-        result = parse_converse_response(response, "claude-sonnet", request_id)
+        result, _, _ = parse_converse_response(response, "claude-sonnet", request_id)
 
         assert len(result.content) == 1
         assert result.content[0].type == "text"
@@ -407,8 +417,306 @@ class TestInvokeConverse:
             mock_client.converse.return_value = mock_response
             mock_get_client.return_value = mock_client
 
-            result = await invoke_converse(request, model, request_id)
+            result, cache_read, cache_write = await invoke_converse(request, model, request_id)
 
         assert result.content[0].text == "Hi there!"
         assert result.usage.input_tokens == 8
+        assert cache_read == 0
+        assert cache_write == 0
         mock_client.converse.assert_called_once()
+
+
+class TestToolChoice:
+    def test_tool_choice_none_omits_tool_config(self):
+        tools = [ToolDefinition(name="search", description="", input_schema=ToolInputSchema())]
+        request = _make_request(tools=tools, tool_choice=ToolChoiceNone())
+        result = build_converse_request(request, _make_model())
+
+        assert "toolConfig" not in result
+
+    def test_tool_choice_any(self):
+        tools = [ToolDefinition(name="search", description="", input_schema=ToolInputSchema())]
+        request = _make_request(tools=tools, tool_choice=ToolChoiceAny())
+        result = build_converse_request(request, _make_model())
+
+        assert result["toolConfig"]["toolChoice"] == {"any": {}}
+
+    def test_tool_choice_unset_keeps_tools_without_choice(self):
+        tools = [ToolDefinition(name="search", description="", input_schema=ToolInputSchema())]
+        request = _make_request(tools=tools)
+        result = build_converse_request(request, _make_model())
+
+        assert "toolConfig" in result
+        assert "toolChoice" not in result["toolConfig"]
+
+
+class TestContentBlockHandling:
+    def test_redacted_thinking_dropped(self):
+        messages = [
+            Message(
+                role="assistant",
+                content=[
+                    RedactedThinkingBlock(data="encrypted"),
+                    TextBlock(text="answer"),
+                ],
+            )
+        ]
+        result = build_converse_request(_make_request(messages=messages), _make_model())
+        content = result["messages"][0]["content"]
+
+        assert content == [{"text": "answer"}]
+
+    def test_server_tool_use_dropped(self):
+        messages = [
+            Message(
+                role="assistant",
+                content=[
+                    ServerToolUseBlock(id="st_1", name="web_search", input={"q": "x"}),
+                    TextBlock(text="done"),
+                ],
+            )
+        ]
+        result = build_converse_request(_make_request(messages=messages), _make_model())
+        content = result["messages"][0]["content"]
+
+        assert content == [{"text": "done"}]
+
+    def test_tool_result_with_image_content(self):
+        messages = [
+            Message(
+                role="user",
+                content=[
+                    ToolResultBlock(
+                        tool_use_id="tu_1",
+                        content=[
+                            TextBlock(text="see image"),
+                            ImageBlock(source=ImageSource(media_type="image/png", data="aWdub3Jl")),
+                        ],
+                    ),
+                ],
+            )
+        ]
+        result = build_converse_request(_make_request(messages=messages), _make_model())
+        tr_content = result["messages"][0]["content"][0]["toolResult"]["content"]
+
+        assert tr_content[0] == {"text": "see image"}
+        assert "image" in tr_content[1]
+        assert tr_content[1]["image"]["format"] == "png"
+        assert isinstance(tr_content[1]["image"]["source"]["bytes"], bytes)
+
+
+class TestUsageSchemaParity:
+    def test_bedrock_leaves_new_fields_null(self):
+        response = {
+            "output": {"message": {"content": [{"text": "hi"}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 5, "cacheReadInputTokens": 3},
+        }
+        result, _, _ = parse_converse_response(response, "claude-sonnet", uuid.uuid4())
+        dumped = result.usage.model_dump()
+
+        # New parity fields exist in the shape but are null for Bedrock.
+        assert dumped["cache_creation"] is None
+        assert dumped["server_tool_use"] is None
+        assert dumped["service_tier"] is None
+        # Existing fields still populated.
+        assert dumped["input_tokens"] == 10
+        assert dumped["cache_read_input_tokens"] == 3
+
+    def test_full_usage_roundtrip(self):
+        from ttllm.schemas.anthropic import CacheCreation, ServerToolUsage, Usage
+
+        usage = Usage(
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_input_tokens=50,
+            cache_creation_input_tokens=30,
+            cache_creation=CacheCreation(ephemeral_5m_input_tokens=30),
+            server_tool_use=ServerToolUsage(web_search_requests=2),
+            service_tier="standard",
+        )
+        dumped = usage.model_dump()
+        assert dumped["cache_creation"]["ephemeral_5m_input_tokens"] == 30
+        assert dumped["server_tool_use"]["web_search_requests"] == 2
+        assert dumped["service_tier"] == "standard"
+
+
+def _make_stream_response(events):
+    """Build a fake converse_stream response whose 'stream' records pulls."""
+
+    class RecordingStream:
+        def __init__(self, items):
+            self._items = list(items)
+            self.pulled = []
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if not self._items:
+                raise StopIteration
+            item = self._items.pop(0)
+            self.pulled.append(item)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    return {"stream": RecordingStream(events)}
+
+
+def _parse_sse(raw: str):
+    lines = raw.strip().split("\n")
+    event_type = lines[0].replace("event: ", "")
+    data = json.loads(lines[1].replace("data: ", ""))
+    return event_type, data
+
+
+class TestStreamConverse:
+    @pytest.mark.asyncio
+    async def test_token_propagation_via_usage_out(self):
+        from ttllm.core.bedrock import stream_converse
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Hi"}}},
+            {"messageStop": {"stopReason": "end_turn"}},
+            {"metadata": {"usage": {
+                "inputTokens": 100, "outputTokens": 40,
+                "cacheReadInputTokens": 50, "cacheWriteInputTokens": 30,
+            }}},
+        ]
+        model = _make_model()
+        usage: dict[str, int] = {}
+
+        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+
+            collected = []
+            async for ev in stream_converse(_make_request(), model, uuid.uuid4(), usage):
+                collected.append(ev)
+
+        assert usage == {
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "cache_read_tokens": 50,
+            "cache_write_tokens": 30,
+        }
+        # message_delta reports the full cumulative usage to the client
+        delta = next(_parse_sse(e) for e in collected if e.startswith("event: message_delta"))
+        assert delta[1]["usage"]["output_tokens"] == 40
+        assert delta[1]["usage"]["input_tokens"] == 100
+        assert delta[1]["usage"]["cache_read_input_tokens"] == 50
+        assert delta[1]["usage"]["cache_creation_input_tokens"] == 30
+
+    @pytest.mark.asyncio
+    async def test_collector_populated_through_gateway(self):
+        from ttllm.core import gateway
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Hi"}}},
+            {"messageStop": {"stopReason": "end_turn"}},
+            {"metadata": {"usage": {
+                "inputTokens": 100, "outputTokens": 40,
+                "cacheReadInputTokens": 50, "cacheWriteInputTokens": 30,
+            }}},
+        ]
+        model = _make_model()
+        model.input_cost_per_1k = 0.003
+        model.output_cost_per_1k = 0.015
+        model.cache_read_cost_per_1k = 0.0003
+        model.cache_write_cost_per_1k = 0.00375
+
+        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+
+            sse_stream, collector = await gateway.stream(_make_request(), model, uuid.uuid4())
+            async for _ in sse_stream:
+                pass
+
+        assert collector.input_tokens == 100
+        assert collector.output_tokens == 40
+        assert collector.cache_read_tokens == 50
+        assert collector.cache_write_tokens == 30
+
+        # finalize is called exactly once (by the API layer); verify the math
+        result = collector.finalize()
+        from decimal import Decimal
+        expected = (
+            (Decimal("100") / 1000) * Decimal("0.003")
+            + (Decimal("40") / 1000) * Decimal("0.015")
+            + (Decimal("50") / 1000) * Decimal("0.0003")
+            + (Decimal("30") / 1000) * Decimal("0.00375")
+        )
+        assert result.cost == expected
+
+    @pytest.mark.asyncio
+    async def test_incremental_yielding(self):
+        """Events are pulled lazily, not drained up front."""
+        from ttllm.core.bedrock import stream_converse
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "a"}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "b"}}},
+            {"messageStop": {"stopReason": "end_turn"}},
+            {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 2}}},
+        ]
+        response = _make_stream_response(events)
+        model = _make_model()
+
+        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = response
+            mock_get_client.return_value = mock_client
+
+            gen = stream_converse(_make_request(), model, uuid.uuid4())
+            # Pull the first SSE event; the source stream must NOT be fully drained.
+            await gen.__anext__()
+            pulled_after_first = len(response["stream"].pulled)
+            rest = [ev async for ev in gen]
+
+        assert pulled_after_first < len(events)
+        assert rest  # remaining events were produced
+
+    @pytest.mark.asyncio
+    async def test_empty_stream(self):
+        from ttllm.core.bedrock import stream_converse
+
+        model = _make_model()
+        usage: dict[str, int] = {}
+
+        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response([])
+            mock_get_client.return_value = mock_client
+
+            collected = [ev async for ev in stream_converse(_make_request(), model, uuid.uuid4(), usage)]
+
+        types = [_parse_sse(e)[0] for e in collected]
+        assert types == ["message_delta", "message_stop"]
+        assert usage["input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_stream_exception_mid_iteration(self):
+        from ttllm.core.bedrock import stream_converse
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            RuntimeError("boom"),
+        ]
+        model = _make_model()
+
+        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+
+            collected = [ev async for ev in stream_converse(_make_request(), model, uuid.uuid4())]
+
+        types = [_parse_sse(e)[0] for e in collected]
+        assert "error" in types

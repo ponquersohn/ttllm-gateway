@@ -25,6 +25,7 @@ async def format_sse_stream(
     """
     input_tokens = 0
     output_tokens = 0
+    cache_read = 0
     block_index = 0
     has_text_block = False
     has_tool_use = False
@@ -108,6 +109,9 @@ async def format_sse_stream(
         if usage_meta and isinstance(usage_meta, dict):
             input_tokens = usage_meta.get("input_tokens", input_tokens)
             output_tokens = usage_meta.get("output_tokens", output_tokens)
+            input_details = usage_meta.get("input_token_details")
+            if isinstance(input_details, dict):
+                cache_read = input_details.get("cache_read", cache_read)
 
     # Store final token counts for the caller
     if token_usage is not None:
@@ -127,7 +131,11 @@ async def format_sse_stream(
     yield _sse_event("message_delta", {
         "type": "message_delta",
         "delta": {"type": "message_delta", "stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {"output_tokens": output_tokens},
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read or None,
+        },
     })
 
     # message_stop

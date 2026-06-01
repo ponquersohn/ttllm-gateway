@@ -21,6 +21,8 @@ async def create_model(
     config_json: dict | None = None,
     input_cost_per_1k: Decimal = Decimal("0"),
     output_cost_per_1k: Decimal = Decimal("0"),
+    cache_read_cost_per_1k: Decimal = Decimal("0"),
+    cache_write_cost_per_1k: Decimal = Decimal("0"),
     match_pattern: str | None = None,
 ) -> LLMModel:
     model = LLMModel(
@@ -30,6 +32,8 @@ async def create_model(
         config_json=config_json or {},
         input_cost_per_1k=input_cost_per_1k,
         output_cost_per_1k=output_cost_per_1k,
+        cache_read_cost_per_1k=cache_read_cost_per_1k,
+        cache_write_cost_per_1k=cache_write_cost_per_1k,
         match_pattern=match_pattern,
     )
     db.add(model)
@@ -75,7 +79,7 @@ async def update_model(
     model = await db.get(LLMModel, model_id)
     if not model:
         return None
-    _MUTABLE_FIELDS = {"name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "is_active", "match_pattern"}
+    _MUTABLE_FIELDS = {"name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "cache_read_cost_per_1k", "cache_write_cost_per_1k", "is_active", "match_pattern"}
     for key, value in kwargs.items():
         if key in _MUTABLE_FIELDS and value is not None:
             setattr(model, key, value)

@@ -61,7 +61,7 @@ class WebSearchToolResultBlock(BaseModel):
 class ToolResultBlock(BaseModel):
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
-    content: str | list[TextBlock] = ""
+    content: str | list[TextBlock | ImageBlock] = ""
     is_error: bool = False
 
 
@@ -170,11 +170,23 @@ class MessagesRequest(BaseModel):
     service_tier: str | None = None
 
 
+class CacheCreation(BaseModel):
+    ephemeral_5m_input_tokens: int | None = None
+    ephemeral_1h_input_tokens: int | None = None
+
+
+class ServerToolUsage(BaseModel):
+    web_search_requests: int | None = None
+
+
 class Usage(BaseModel):
     input_tokens: int
     output_tokens: int
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    cache_creation: CacheCreation | None = None
+    server_tool_use: ServerToolUsage | None = None
+    service_tier: str | None = None
 
 
 class StopDetails(BaseModel):
@@ -248,7 +260,10 @@ class StreamDelta(BaseModel):
 
 
 class StreamUsage(BaseModel):
+    input_tokens: int | None = None
     output_tokens: int
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
 
 
 class StreamEventMessageDelta(BaseModel):

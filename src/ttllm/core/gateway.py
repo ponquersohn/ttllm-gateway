@@ -73,13 +73,20 @@ async def invoke(
     start = time.monotonic()
 
     if llm_model.provider == "bedrock":
-        response = await _invoke_bedrock(request, llm_model, request_id)
+        response, cache_read, cache_write = await _invoke_bedrock(request, llm_model, request_id)
     else:
         response = await _invoke_langchain(request, llm_model, request_id)
+        cache_read = cache_write = 0
 
     input_tokens = response.usage.input_tokens
     output_tokens = response.usage.output_tokens
-    cost = token_tracker.calculate_cost(input_tokens, output_tokens, llm_model)
+    cost = token_tracker.calculate_cost(
+        input_tokens,
+        output_tokens,
+        llm_model,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+    )
     latency_ms = int((time.monotonic() - start) * 1000)
 
     return InvokeResult(
@@ -93,7 +100,7 @@ async def invoke(
 
 async def _invoke_bedrock(
     request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
-) -> MessagesResponse:
+) -> tuple[MessagesResponse, int, int]:
     from ttllm.core.bedrock import invoke_converse
 
     return await invoke_converse(request, llm_model, request_id)
@@ -156,10 +163,14 @@ async def _stream_bedrock(
 ) -> AsyncIterator[str]:
     from ttllm.core.bedrock import stream_converse
 
-    async for event in stream_converse(request, llm_model, request_id):
+    usage: dict[str, int] = {}
+    async for event in stream_converse(request, llm_model, request_id, usage):
         yield event
 
-    collector.finalize()
+    collector.input_tokens = usage.get("input_tokens", 0)
+    collector.output_tokens = usage.get("output_tokens", 0)
+    collector.cache_read_tokens = usage.get("cache_read_tokens", 0)
+    collector.cache_write_tokens = usage.get("cache_write_tokens", 0)
 
 
 async def _stream_langchain(
@@ -185,7 +196,6 @@ async def _stream_langchain(
 
     collector.input_tokens = token_usage.get("input_tokens", 0)
     collector.output_tokens = token_usage.get("output_tokens", 0)
-    collector.finalize()
 
 
 class StreamCollector:
@@ -195,15 +205,21 @@ class StreamCollector:
         self.llm_model = llm_model
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.cache_write_tokens = 0
         self.cost = Decimal("0")
         self.latency_ms = 0
         self._start = time.monotonic()
 
-    def finalize(self, input_tokens: int = 0, output_tokens: int = 0) -> StreamResult:
-        self.input_tokens = input_tokens or self.input_tokens
-        self.output_tokens = output_tokens or self.output_tokens
+    def finalize(self) -> StreamResult:
+        """Compute cost from the accumulated token counts. Called exactly once,
+        after the SSE stream has been fully consumed."""
         self.cost = token_tracker.calculate_cost(
-            self.input_tokens, self.output_tokens, self.llm_model
+            self.input_tokens,
+            self.output_tokens,
+            self.llm_model,
+            cache_read_tokens=self.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens,
         )
         self.latency_ms = int((time.monotonic() - self._start) * 1000)
         return StreamResult(

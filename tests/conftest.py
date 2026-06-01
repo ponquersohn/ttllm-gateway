@@ -53,5 +53,7 @@ def mock_llm_model():
     model.config_json = {}
     model.input_cost_per_1k = Decimal("0.003")
     model.output_cost_per_1k = Decimal("0.015")
+    model.cache_read_cost_per_1k = Decimal("0.0003")
+    model.cache_write_cost_per_1k = Decimal("0.00375")
     model.is_active = True
     return model

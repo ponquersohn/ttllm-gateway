@@ -137,3 +137,41 @@ async def test_tool_use_only_stream():
 
     delta_event = next(e for e in events if e[0] == "message_delta")
     assert delta_event[1]["delta"]["stop_reason"] == "tool_use"
+
+
+@pytest.mark.asyncio
+async def test_message_delta_reports_input_tokens():
+    async def mock_stream():
+        chunk = AIMessageChunk(content="Hi")
+        chunk.usage_metadata = {"input_tokens": 42, "output_tokens": 7}
+        yield chunk
+
+    request_id = uuid.uuid4()
+    stream = format_sse_stream(mock_stream(), "test-model", request_id, {})
+    events = _parse_events(await _collect_stream(stream))
+
+    usage = next(e for e in events if e[0] == "message_delta")[1]["usage"]
+    assert usage["input_tokens"] == 42
+    assert usage["output_tokens"] == 7
+    # No cache info supplied → cache_read_input_tokens is null
+    assert usage["cache_read_input_tokens"] is None
+
+
+@pytest.mark.asyncio
+async def test_message_delta_surfaces_cache_read():
+    async def mock_stream():
+        chunk = AIMessageChunk(content="Hi")
+        chunk.usage_metadata = {
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "input_token_details": {"cache_read": 60},
+        }
+        yield chunk
+
+    request_id = uuid.uuid4()
+    stream = format_sse_stream(mock_stream(), "test-model", request_id, {})
+    events = _parse_events(await _collect_stream(stream))
+
+    usage = next(e for e in events if e[0] == "message_delta")[1]["usage"]
+    assert usage["input_tokens"] == 100
+    assert usage["cache_read_input_tokens"] == 60

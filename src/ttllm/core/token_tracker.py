@@ -8,13 +8,19 @@ def calculate_cost(
     input_tokens: int,
     output_tokens: int,
     llm_model: Any,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> Decimal:
     """Calculate the cost based on token counts and model pricing.
 
     Args:
-        input_tokens: Number of input tokens.
+        input_tokens: Number of fresh input tokens (excluding cache reads).
         output_tokens: Number of output tokens.
-        llm_model: Model object with input_cost_per_1k and output_cost_per_1k.
+        llm_model: Model object with input_cost_per_1k / output_cost_per_1k and,
+            optionally, cache_read_cost_per_1k / cache_write_cost_per_1k.
+        cache_read_tokens: Number of prompt-cache read tokens, billed at the
+            cache-read rate instead of the input rate.
+        cache_write_tokens: Number of prompt-cache write tokens.
 
     Returns:
         Total cost as a Decimal.
@@ -25,7 +31,13 @@ def calculate_cost(
     output_cost = (Decimal(output_tokens) / 1000) * Decimal(
         str(llm_model.output_cost_per_1k)
     )
-    return input_cost + output_cost
+    cache_read_cost = (Decimal(cache_read_tokens) / 1000) * Decimal(
+        str(getattr(llm_model, "cache_read_cost_per_1k", 0) or 0)
+    )
+    cache_write_cost = (Decimal(cache_write_tokens) / 1000) * Decimal(
+        str(getattr(llm_model, "cache_write_cost_per_1k", 0) or 0)
+    )
+    return input_cost + output_cost + cache_read_cost + cache_write_cost
 
 
 def extract_token_counts(response: Any) -> tuple[int, int]:

@@ -254,6 +254,26 @@ Now any request with a model string starting with `claude-haiku-4.5` (e.g. `clau
 - Invalid regex patterns are rejected at creation time.
 - To clear a pattern: `ttllm models update <name> --match-pattern ""`
 
+## Model Pricing
+
+Each model carries per-1K-token prices used to compute the cost recorded in audit logs:
+
+```bash
+ttllm models create \
+  --name claude-sonnet \
+  --provider bedrock \
+  --provider-model-id anthropic.claude-sonnet-4-20250514-v1:0 \
+  --input-cost 0.003 \
+  --output-cost 0.015 \
+  --cache-read-cost 0.0003 \
+  --cache-write-cost 0.00375
+```
+
+- `--input-cost` / `--output-cost` — price per 1K fresh input and output tokens.
+- `--cache-read-cost` / `--cache-write-cost` — price per 1K prompt-cache read and write tokens (Bedrock). Cache-read tokens are billed at this rate **instead of** the input rate, not in addition to it. Defaults to `0` when unset, so existing models bill cache reads at no extra cost until prices are configured.
+
+All four are also accepted by `ttllm models update` with the same flags.
+
 ## CLI
 
 Admin operations via the `ttllm` CLI:
