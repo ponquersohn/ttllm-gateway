@@ -151,7 +151,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok"}
+        return {"status": "ok", "version": __version__}
 
     # --- Authenticated API docs ---
     from ttllm.api.deps import get_authenticated

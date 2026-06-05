@@ -16,7 +16,9 @@ a{color:var(--accent);text-decoration:none}
 
 /* Header */
 .header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
+.header-left{display:flex;align-items:baseline;gap:8px}
 .header h1{font-size:18px;font-weight:700;letter-spacing:-.5px}
+.header .version{font-size:12px;color:var(--text-secondary);font-weight:500}
 .header-right{display:flex;align-items:center;gap:12px;font-size:14px;color:var(--text-secondary)}
 .header-right button{background:none;border:1px solid var(--border);border-radius:var(--radius);padding:4px 12px;cursor:pointer;font-size:13px;color:var(--text-secondary)}
 .header-right button:hover{background:var(--bg);color:var(--text)}
@@ -154,7 +156,10 @@ tr:hover td{background:rgba(0,0,0,.015)}
 <body>
 
 <div class="header">
-  <h1>TTLLM</h1>
+  <div class="header-left">
+    <h1>TTLLM</h1>
+    <span class="version" id="app-version"></span>
+  </div>
   <div class="header-right" id="header-right"></div>
 </div>
 
@@ -961,8 +966,21 @@ tr:hover td{background:rgba(0,0,0,.015)}
     return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
+  // --- Version ---
+  async function loadVersion() {
+    try {
+      const resp = await fetch("/health");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.version) {
+        $("#app-version").textContent = "v" + data.version;
+      }
+    } catch (_) { /* ignore */ }
+  }
+
   // --- Init ---
   async function init() {
+    loadVersion();
     // Check for SSO callback tokens in URL
     var params = new URLSearchParams(window.location.search);
     if (params.has("access_token")) {
