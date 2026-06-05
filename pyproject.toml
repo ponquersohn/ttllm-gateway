@@ -84,9 +84,10 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not integration'"
 markers = [
     "failing_test: marks tests as known failing (deselect with '-m \"not failing_test\"')",
+    "integration: end-to-end tests requiring the docker-compose stack (run with '-m integration')",
 ]
 
 [tool.black]

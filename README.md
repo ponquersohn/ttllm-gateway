@@ -1,6 +1,26 @@
 # TTLLM Gateway
 
-LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing requests through LangChain to any supported provider (Bedrock, OpenAI, etc.). Tracks tokens, costs, and maintains audit trails. Supports user management with per-user model access control.
+LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing requests to any supported provider (Bedrock via direct boto3 Converse API, OpenAI-compatible via LangChain). Tracks tokens, costs, and maintains audit trails. Supports user management with per-user model access control.
+
+## Supported Features
+
+| Feature | Bedrock | OpenAI-compatible |
+|---------|---------|-------------------|
+| Text messages | Yes | Yes |
+| Multi-turn conversations | Yes | Yes |
+| System prompts | Yes | Yes |
+| Streaming (SSE) | Yes | Yes |
+| Tool use (client-defined) | Yes | Yes |
+| Image inputs (base64) | Yes | Yes |
+| Document inputs (PDF) | Yes | No |
+| Extended thinking | Yes | No |
+| Token tracking & cost | Yes | Yes |
+| Cache token reporting | Yes | No |
+| Server-side tools | 501 (not proxied) | 501 (not proxied) |
+
+### Architecture Note
+
+Bedrock requests are handled via direct boto3 `converse()` / `converse_stream()` calls with full Anthropic-to-Bedrock format translation. This eliminates the LangChain translation layer for Bedrock, reducing latency and enabling native support for extended thinking, document inputs, and cache token reporting. OpenAI-compatible providers (Ollama, vLLM, etc.) continue to use LangChain.
 
 ## Quick Start
 
@@ -234,6 +254,42 @@ Now any request with a model string starting with `claude-haiku-4.5` (e.g. `clau
 - Invalid regex patterns are rejected at creation time.
 - To clear a pattern: `ttllm models update <name> --match-pattern ""`
 
+## Model Pricing
+
+Each model carries per-1K-token prices used to compute the cost recorded in audit logs:
+
+```bash
+ttllm models create \
+  --name claude-sonnet \
+  --provider bedrock \
+  --provider-model-id anthropic.claude-sonnet-4-20250514-v1:0 \
+  --input-cost 0.003 \
+  --output-cost 0.015 \
+  --cache-read-cost 0.0003 \
+  --cache-write-cost 0.00375
+```
+
+- `--input-cost` / `--output-cost` — price per 1K fresh input and output tokens.
+- `--cache-read-cost` / `--cache-write-cost` — price per 1K prompt-cache read and write tokens (Bedrock). Cache-read tokens are billed at this rate **instead of** the input rate, not in addition to it. Defaults to `0` when unset, so existing models bill cache reads at no extra cost until prices are configured.
+
+All four are also accepted by `ttllm models update` with the same flags.
+
+## Bedrock Model Config
+
+Bedrock models accept these keys in `config_json` (all optional):
+
+- `region` — AWS region; falls back to `provider.default_region`.
+- `aws_profile` — named profile, or `aws_access_key_id` / `aws_secret_access_key` / `aws_session_token` for explicit credentials (use `secret://` references for the secret values).
+- `endpoint_url` — override the Bedrock runtime endpoint. Useful for VPC interface endpoints, LocalStack, or pointing tests at a fake Bedrock server. Omit to use the AWS default endpoint for the region.
+
+```bash
+ttllm models create \
+  --name claude-sonnet \
+  --provider bedrock \
+  --provider-model-id anthropic.claude-sonnet-4-20250514-v1:0 \
+  --config '{"region":"us-east-1","endpoint_url":"https://bedrock-runtime.us-east-1.amazonaws.com"}'
+```
+
 ## CLI
 
 Admin operations via the `ttllm` CLI:
@@ -284,7 +340,7 @@ The overall status is `ok` when all checks pass, or `degraded` when any check re
 
 ## Releasing
 
-Releases are created from the `main` branch. The version is derived automatically from git tags (via `hatch-vcs`), so no source file needs editing.
+Releases must be cut from reviewed code: the released commit has to be on `main` or a `release/*` branch. Both are protected (a reviewed PR is required to land code), and the release workflow verifies this before publishing — a release whose commit is not contained in one of those branches fails the publish job. The version is derived automatically from git tags (via `hatch-vcs`), so no source file needs editing.
 
 ```bash
 make release         # Patch bump (v0.0.1 -> v0.0.2)
@@ -294,7 +350,7 @@ make release-major   # Major bump (v1.0.0 -> v2.0.0)
 
 After running `make release*`, follow the printed instructions to push the tag and create the GitHub release. Publishing a GitHub release triggers the CI workflow to:
 
-1. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/)
+1. **Publish** the Python package to [PyPI](https://pypi.org/project/ttllm-gateway/) (only if the release commit is on `main` or a `release/*` branch)
 2. **Build and push** the Docker image to `ghcr.io/ponquersohn/ttllm-gateway`
 
 ## Self-Service Web UI
@@ -325,5 +381,23 @@ For end-user documentation covering login, token creation, API usage, SDK integr
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest                       # unit tests (integration tests are excluded by default)
 ```
+
+### Integration tests
+
+End-to-end tests run the real gateway + PostgreSQL + a fake Bedrock server (which speaks the
+actual boto3 `converse` / `converse_stream` wire protocol, including AWS event-stream framing)
+via docker-compose, then exercise the full flow: create user → create model → assign → mint
+token → `POST /v1/messages` (streaming and non-streaming).
+
+```bash
+docker compose -f docker-compose.integration.yml up -d --build
+pytest tests/integration -m integration     # hits http://localhost:8000
+docker compose -f docker-compose.integration.yml down -v
+```
+
+The fake Bedrock is reached by the gateway at its compose-internal URL
+(`http://fake-bedrock:9099`), configured per-model via `config_json.endpoint_url` (see below).
+If host port 8000 is busy, set `TTLLM_HOST_PORT` and point the tests at it with
+`TTLLM_TEST_BASE_URL`. These tests also run automatically in CI (`.github/workflows/integration.yml`).

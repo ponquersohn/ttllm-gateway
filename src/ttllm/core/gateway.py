@@ -1,7 +1,7 @@
 """Main gateway orchestrator. Ties together translation, provider, and tracking.
 
-Depends on core modules and pydantic schemas only. Database writes are handled
-by the caller (API layer) using the returned metadata.
+Routes Bedrock requests directly through boto3 Converse API (no LangChain).
+Routes OpenAI-compatible requests through LangChain (unchanged).
 """
 
 from __future__ import annotations
@@ -12,12 +12,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, AsyncIterator
 
-from langchain_core.messages import AIMessage
-
-from ttllm.core import token_tracker, translator
-from ttllm.core.provider import registry as provider_registry
-from ttllm.core.streaming import format_sse_stream
-from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse
+from ttllm.core import token_tracker
+from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse, ServerToolDefinition
 
 
 @dataclass
@@ -41,6 +37,18 @@ class StreamResult:
     latency_ms: int
 
 
+class ServerToolError(Exception):
+    """Raised when a request contains server-side tools that cannot be proxied."""
+
+    pass
+
+
+def _has_server_tools(request: MessagesRequest) -> bool:
+    if not request.tools:
+        return False
+    return any(isinstance(t, ServerToolDefinition) for t in request.tools)
+
+
 async def invoke(
     request: MessagesRequest,
     llm_model: Any,
@@ -56,7 +64,55 @@ async def invoke(
     Returns:
         InvokeResult with the response and tracking metadata.
     """
+    if _has_server_tools(request):
+        raise ServerToolError(
+            "Server-side tools (web_search, code_execution) cannot be proxied through the gateway. "
+            "Remove server tool definitions and handle them client-side."
+        )
+
     start = time.monotonic()
+
+    if llm_model.provider == "bedrock":
+        response, cache_read, cache_write = await _invoke_bedrock(request, llm_model, request_id)
+    else:
+        response = await _invoke_langchain(request, llm_model, request_id)
+        cache_read = cache_write = 0
+
+    input_tokens = response.usage.input_tokens
+    output_tokens = response.usage.output_tokens
+    cost = token_tracker.calculate_cost(
+        input_tokens,
+        output_tokens,
+        llm_model,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+    )
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    return InvokeResult(
+        response=response,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost=cost,
+        latency_ms=latency_ms,
+    )
+
+
+async def _invoke_bedrock(
+    request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
+) -> tuple[MessagesResponse, int, int]:
+    from ttllm.core.bedrock import invoke_converse
+
+    return await invoke_converse(request, llm_model, request_id)
+
+
+async def _invoke_langchain(
+    request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
+) -> MessagesResponse:
+    from langchain_core.messages import AIMessage
+
+    from ttllm.core import translator
+    from ttllm.core.provider import registry as provider_registry
 
     messages = translator.to_langchain_messages(request)
     invoke_params = translator.extract_invoke_params(request)
@@ -66,19 +122,9 @@ async def invoke(
     result: AIMessage = await runnable.ainvoke(messages)
 
     input_tokens, output_tokens = token_tracker.extract_token_counts(result)
-    cost = token_tracker.calculate_cost(input_tokens, output_tokens, llm_model)
-    latency_ms = int((time.monotonic() - start) * 1000)
 
-    response = translator.from_langchain_response(
+    return translator.from_langchain_response(
         result, llm_model.name, request_id, input_tokens, output_tokens
-    )
-
-    return InvokeResult(
-        response=response,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cost=cost,
-        latency_ms=latency_ms,
     )
 
 
@@ -93,22 +139,63 @@ async def stream(
     The collector accumulates token counts during streaming and can be
     read after the stream is exhausted.
     """
+    if _has_server_tools(request):
+        raise ServerToolError(
+            "Server-side tools (web_search, code_execution) cannot be proxied through the gateway. "
+            "Remove server tool definitions and handle them client-side."
+        )
+
+    collector = StreamCollector(llm_model=llm_model)
+
+    if llm_model.provider == "bedrock":
+        sse_stream = _stream_bedrock(request, llm_model, request_id, collector)
+    else:
+        sse_stream = _stream_langchain(request, llm_model, request_id, collector)
+
+    return sse_stream, collector
+
+
+async def _stream_bedrock(
+    request: MessagesRequest,
+    llm_model: Any,
+    request_id: uuid.UUID,
+    collector: StreamCollector,
+) -> AsyncIterator[str]:
+    from ttllm.core.bedrock import stream_converse
+
+    usage: dict[str, int] = {}
+    async for event in stream_converse(request, llm_model, request_id, usage):
+        yield event
+
+    collector.input_tokens = usage.get("input_tokens", 0)
+    collector.output_tokens = usage.get("output_tokens", 0)
+    collector.cache_read_tokens = usage.get("cache_read_tokens", 0)
+    collector.cache_write_tokens = usage.get("cache_write_tokens", 0)
+
+
+async def _stream_langchain(
+    request: MessagesRequest,
+    llm_model: Any,
+    request_id: uuid.UUID,
+    collector: StreamCollector,
+) -> AsyncIterator[str]:
+    from ttllm.core import translator
+    from ttllm.core.provider import registry as provider_registry
+    from ttllm.core.streaming import format_sse_stream
+
     messages = translator.to_langchain_messages(request)
     invoke_params = translator.extract_invoke_params(request)
     chat_model = provider_registry.get_chat_model(llm_model, invoke_params)
     runnable = translator.bind_tools_to_model(chat_model, request.tools, request.tool_choice)
 
-    collector = StreamCollector(llm_model=llm_model)
     lc_stream = runnable.astream(messages)
     token_usage: dict[str, int] = {}
 
-    sse_stream = _tracked_stream(
-        format_sse_stream(lc_stream, llm_model.name, request_id, token_usage),
-        collector,
-        token_usage,
-    )
+    async for event in format_sse_stream(lc_stream, llm_model.name, request_id, token_usage):
+        yield event
 
-    return sse_stream, collector
+    collector.input_tokens = token_usage.get("input_tokens", 0)
+    collector.output_tokens = token_usage.get("output_tokens", 0)
 
 
 class StreamCollector:
@@ -118,15 +205,21 @@ class StreamCollector:
         self.llm_model = llm_model
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.cache_write_tokens = 0
         self.cost = Decimal("0")
         self.latency_ms = 0
         self._start = time.monotonic()
 
-    def finalize(self, input_tokens: int = 0, output_tokens: int = 0) -> StreamResult:
-        self.input_tokens = input_tokens or self.input_tokens
-        self.output_tokens = output_tokens or self.output_tokens
+    def finalize(self) -> StreamResult:
+        """Compute cost from the accumulated token counts. Called exactly once,
+        after the SSE stream has been fully consumed."""
         self.cost = token_tracker.calculate_cost(
-            self.input_tokens, self.output_tokens, self.llm_model
+            self.input_tokens,
+            self.output_tokens,
+            self.llm_model,
+            cache_read_tokens=self.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens,
         )
         self.latency_ms = int((time.monotonic() - self._start) * 1000)
         return StreamResult(
@@ -135,16 +228,3 @@ class StreamCollector:
             cost=self.cost,
             latency_ms=self.latency_ms,
         )
-
-
-async def _tracked_stream(
-    sse_stream: AsyncIterator[str],
-    collector: StreamCollector,
-    token_usage: dict[str, int],
-) -> AsyncIterator[str]:
-    """Wrap SSE stream and pass collected token counts to the collector."""
-    async for event in sse_stream:
-        yield event
-    # Store token counts on collector so the API layer can finalize
-    collector.input_tokens = token_usage.get("input_tokens", 0)
-    collector.output_tokens = token_usage.get("output_tokens", 0)

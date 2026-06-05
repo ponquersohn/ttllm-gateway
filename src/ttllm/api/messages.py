@@ -14,13 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ttllm.api.deps import AuthContext, DB, _authenticate, get_db, require_permission
 from ttllm.config import settings
 from ttllm.core import gateway
+from ttllm.core.gateway import ServerToolError
 from ttllm.core.permissions import Permissions
 from ttllm.schemas.anthropic import MessagesRequest
 from ttllm.services import audit_service, model_service, secret_service
 
 logger = logging.getLogger(__name__)
 
-# Map Bedrock/AWS error codes to Anthropic-compatible error types and HTTP status codes.
 _BEDROCK_ERROR_MAP: dict[str, tuple[int, str]] = {
     "ThrottlingException": (529, "overloaded_error"),
     "ModelTimeoutException": (529, "overloaded_error"),
@@ -38,6 +38,9 @@ _BEDROCK_ERROR_MAP: dict[str, tuple[int, str]] = {
 
 def _classify_provider_error(exc: Exception) -> tuple[int, str, str]:
     """Return (http_status, anthropic_error_type, message) for a provider exception."""
+    if isinstance(exc, ServerToolError):
+        return (501, "not_implemented_error", str(exc))
+
     if isinstance(exc, ReadTimeoutError):
         return (529, "overloaded_error", "Model request timed out — try again or use streaming")
 
@@ -96,7 +99,6 @@ async def create_message(
     """Create a message using the Anthropic Messages API format."""
     request_id = uuid.uuid4()
 
-    # Check model access
     llm_model = await model_service.get_model_for_user(db, ctx.user.id, body.model)
     if not llm_model:
         raise HTTPException(
@@ -107,7 +109,6 @@ async def create_message(
             },
         )
 
-    # Resolve secret:// references in model config without mutating the ORM object
     resolved_config = await secret_service.resolve_model_config(db, llm_model.config_json or {})
     resolved_model = _ModelProxy(llm_model, resolved_config)
 
@@ -126,7 +127,6 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
     try:
         result = await gateway.invoke(body, llm_model, request_id)
 
-        # Write audit log
         await audit_service.log_request(
             db,
             user_id=user.id,

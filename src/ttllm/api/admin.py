@@ -151,9 +151,12 @@ async def create_user(
     db: DB,
     ctx: AuthContext = Depends(require_permission(Permissions.USER_CREATE)),
 ):
-    user = await user_service.create_user(
-        db, name=body.name, email=body.email, password=body.password
-    )
+    try:
+        user = await user_service.create_user(
+            db, name=body.name, email=body.email, password=body.password
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail={"type": "invalid_request", "message": str(e)})
     await admin_audit_service.log(
         db, actor_id=ctx.user.id, actor_jti=ctx.jti,
         action="user.create", resource_type="user", resource_id=user.id,
@@ -334,6 +337,8 @@ async def create_model(
         config_json=body.config_json,
         input_cost_per_1k=body.input_cost_per_1k,
         output_cost_per_1k=body.output_cost_per_1k,
+        cache_read_cost_per_1k=body.cache_read_cost_per_1k,
+        cache_write_cost_per_1k=body.cache_write_cost_per_1k,
         match_pattern=body.match_pattern,
     )
     await admin_audit_service.log(

@@ -46,6 +46,8 @@ def models_list(
     table.add_column("Match Pattern")
     table.add_column("Input $/1K")
     table.add_column("Output $/1K")
+    table.add_column("Cache R $/1K")
+    table.add_column("Cache W $/1K")
     table.add_column("Active")
 
     for m in data["items"]:
@@ -57,6 +59,8 @@ def models_list(
             m.get("match_pattern") or "",
             str(m["input_cost_per_1k"]),
             str(m["output_cost_per_1k"]),
+            str(m.get("cache_read_cost_per_1k", "0")),
+            str(m.get("cache_write_cost_per_1k", "0")),
             "Yes" if m["is_active"] else "No",
         )
     console.print(table)
@@ -83,6 +87,8 @@ def models_show(
     console.print(f"  Provider Model ID: {data['provider_model_id']}")
     console.print(f"  Input cost/1K: {data['input_cost_per_1k']}")
     console.print(f"  Output cost/1K: {data['output_cost_per_1k']}")
+    console.print(f"  Cache read cost/1K: {data.get('cache_read_cost_per_1k', '0')}")
+    console.print(f"  Cache write cost/1K: {data.get('cache_write_cost_per_1k', '0')}")
     console.print(f"  Active: {'Yes' if data['is_active'] else 'No'}")
     console.print(f"  Created: {data['created_at'][:10]}")
     if data.get("match_pattern"):
@@ -98,6 +104,8 @@ def models_create(
     provider_model_id: str = typer.Option(..., help="Provider-specific model ID"),
     input_cost: float = typer.Option(0.0, help="Cost per 1K input tokens"),
     output_cost: float = typer.Option(0.0, help="Cost per 1K output tokens"),
+    cache_read_cost: float = typer.Option(0.0, "--cache-read-cost", help="Cost per 1K cache-read input tokens"),
+    cache_write_cost: float = typer.Option(0.0, "--cache-write-cost", help="Cost per 1K cache-write input tokens"),
     config: Optional[str] = typer.Option(None, help="JSON config string"),
     match_pattern: Optional[str] = typer.Option(None, "--match-pattern", help="Regex pattern for flexible model name matching"),
 ):
@@ -110,6 +118,8 @@ def models_create(
         "config_json": config_json,
         "input_cost_per_1k": str(input_cost),
         "output_cost_per_1k": str(output_cost),
+        "cache_read_cost_per_1k": str(cache_read_cost),
+        "cache_write_cost_per_1k": str(cache_write_cost),
     }
     if match_pattern is not None:
         body["match_pattern"] = match_pattern
@@ -129,6 +139,8 @@ def models_update(
     config: Optional[str] = typer.Option(None, "--config", help="New JSON config (replaces existing)"),
     input_cost: Optional[float] = typer.Option(None, "--input-cost", help="Cost per 1K input tokens"),
     output_cost: Optional[float] = typer.Option(None, "--output-cost", help="Cost per 1K output tokens"),
+    cache_read_cost: Optional[float] = typer.Option(None, "--cache-read-cost", help="Cost per 1K cache-read input tokens"),
+    cache_write_cost: Optional[float] = typer.Option(None, "--cache-write-cost", help="Cost per 1K cache-write input tokens"),
     match_pattern: Optional[str] = typer.Option(None, "--match-pattern", help="Regex pattern (use empty string to clear)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat model argument as UUID"),
 ):
@@ -146,6 +158,10 @@ def models_update(
         body["input_cost_per_1k"] = str(input_cost)
     if output_cost is not None:
         body["output_cost_per_1k"] = str(output_cost)
+    if cache_read_cost is not None:
+        body["cache_read_cost_per_1k"] = str(cache_read_cost)
+    if cache_write_cost is not None:
+        body["cache_write_cost_per_1k"] = str(cache_write_cost)
     if match_pattern is not None:
         body["match_pattern"] = match_pattern if match_pattern != "" else None
     if not body:

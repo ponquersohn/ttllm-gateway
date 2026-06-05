@@ -21,13 +21,18 @@ from langchain_core.runnables import Runnable
 
 from ttllm.schemas.anthropic import (
     ContentBlock,
+    DocumentBlock,
     ImageBlock,
     Message,
     MessagesRequest,
     MessagesResponse,
+    RedactedThinkingBlock,
+    ServerToolDefinition,
     TextBlock,
+    ThinkingBlock,
     ToolChoiceAny,
     ToolChoiceAuto,
+    ToolChoiceNone,
     ToolChoiceTool,
     ToolDefinition,
     ToolResultBlock,
@@ -35,7 +40,18 @@ from ttllm.schemas.anthropic import (
     Usage,
 )
 
-ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool
+ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool | ToolChoiceNone
+
+
+def partition_tools(
+    tools: list[ToolDefinition | ServerToolDefinition] | None,
+) -> tuple[list[ToolDefinition], list[ServerToolDefinition]]:
+    """Separate client-defined tools from server-side tool declarations."""
+    if not tools:
+        return [], []
+    client_tools = [t for t in tools if isinstance(t, ToolDefinition)]
+    server_tools = [t for t in tools if isinstance(t, ServerToolDefinition)]
+    return client_tools, server_tools
 
 
 def _convert_content_to_langchain(content: str | list[ContentBlock]) -> str | list[dict]:
@@ -127,6 +143,18 @@ def to_langchain_messages(request: MessagesRequest) -> list[BaseMessage]:
                 msgs.append(ai_msg)
             else:
                 msgs.append(AIMessage(content=content))
+
+        elif msg.role == "system":
+            # Anthropic mid-conversation system message — emit a SystemMessage in
+            # place so it keeps its position relative to the surrounding turns.
+            if isinstance(msg.content, str):
+                system_text = msg.content
+            else:
+                system_text = "\n".join(
+                    b.text for b in msg.content if isinstance(b, TextBlock)
+                )
+            if system_text:
+                msgs.append(SystemMessage(content=system_text))
 
     return msgs
 

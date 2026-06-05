@@ -20,7 +20,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      TTLLM_DATABASE_URL: postgresql+asyncpg://ttllm:dev@db:5432/ttllm
+      TTLLM_DATABASE__URL: postgresql+asyncpg://ttllm:dev@db:5432/ttllm
       AWS_DEFAULT_REGION: us-east-1
     depends_on:
       db:
