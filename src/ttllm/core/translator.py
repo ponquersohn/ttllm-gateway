@@ -144,6 +144,18 @@ def to_langchain_messages(request: MessagesRequest) -> list[BaseMessage]:
             else:
                 msgs.append(AIMessage(content=content))
 
+        elif msg.role == "system":
+            # Anthropic mid-conversation system message — emit a SystemMessage in
+            # place so it keeps its position relative to the surrounding turns.
+            if isinstance(msg.content, str):
+                system_text = msg.content
+            else:
+                system_text = "\n".join(
+                    b.text for b in msg.content if isinstance(b, TextBlock)
+                )
+            if system_text:
+                msgs.append(SystemMessage(content=system_text))
+
     return msgs
 
 

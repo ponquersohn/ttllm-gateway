@@ -147,7 +147,10 @@ ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool | ToolChoiceNone
 
 
 class Message(BaseModel):
-    role: Literal["user", "assistant"]
+    # "system" is accepted mid-array for Anthropic's mid-conversation system
+    # messages (beta mid-conversation-system-2026-04-07). Bedrock Converse has no
+    # inline system role, so the translator lifts these into the top-level system.
+    role: Literal["user", "assistant", "system"]
     content: str | list[ContentBlock]
 
 

@@ -144,6 +144,17 @@ def _convert_message_to_bedrock(msg: Message) -> dict[str, Any]:
     return {"role": msg.role, "content": content_parts}
 
 
+def _message_to_system_text(msg: Message) -> str:
+    """Flatten a system-role message's content into plain text.
+
+    Bedrock Converse system blocks are text-only, so non-text content blocks
+    (the model would not send them on a system turn) are dropped.
+    """
+    if isinstance(msg.content, str):
+        return msg.content
+    return "\n".join(b.text for b in msg.content if isinstance(b, TextBlock))
+
+
 def _convert_tools_to_bedrock(tools: list[ToolDefinition | ServerToolDefinition]) -> list[dict[str, Any]]:
     tool_specs = []
     for tool in tools:
@@ -161,14 +172,29 @@ def _convert_tools_to_bedrock(tools: list[ToolDefinition | ServerToolDefinition]
 def build_converse_request(request: MessagesRequest, llm_model: Any) -> dict[str, Any]:
     params: dict[str, Any] = {"modelId": llm_model.provider_model_id}
 
-    messages = [_convert_message_to_bedrock(msg) for msg in request.messages]
+    # Bedrock Converse only accepts user/assistant turns in `messages`; system
+    # turns (Anthropic mid-conversation system messages) are lifted out and
+    # appended to the top-level system array, preserving their order.
+    messages = [
+        _convert_message_to_bedrock(msg)
+        for msg in request.messages
+        if msg.role != "system"
+    ]
     params["messages"] = messages
 
+    system_blocks: list[dict[str, Any]] = []
     if request.system:
         if isinstance(request.system, str):
-            params["system"] = [{"text": request.system}]
+            system_blocks.append({"text": request.system})
         else:
-            params["system"] = [{"text": block.text} for block in request.system]
+            system_blocks.extend({"text": block.text} for block in request.system)
+    for msg in request.messages:
+        if msg.role == "system":
+            text = _message_to_system_text(msg)
+            if text:
+                system_blocks.append({"text": text})
+    if system_blocks:
+        params["system"] = system_blocks
 
     inference_config: dict[str, Any] = {"maxTokens": request.max_tokens}
     if request.temperature is not None:

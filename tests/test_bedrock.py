@@ -81,6 +81,52 @@ class TestBuildConverseRequest:
 
         assert result["system"] == [{"text": "Part 1"}, {"text": "Part 2"}]
 
+    def test_mid_conversation_system_message_lifted_to_system(self):
+        # Anthropic mid-conversation system messages arrive as a system-role turn
+        # inside messages; Bedrock Converse has no inline system role, so it must
+        # be lifted out into the top-level system array.
+        request = _make_request(
+            messages=[
+                Message(role="user", content="Hello"),
+                Message(role="system", content="Terse mode enabled."),
+                Message(role="user", content="Continue"),
+            ]
+        )
+        model = _make_model()
+        result = build_converse_request(request, model)
+
+        assert result["system"] == [{"text": "Terse mode enabled."}]
+        assert [m["role"] for m in result["messages"]] == ["user", "user"]
+
+    def test_mid_conversation_system_appended_after_top_level_system(self):
+        request = _make_request(
+            system="Base prompt.",
+            messages=[
+                Message(role="user", content="Hi"),
+                Message(role="system", content="Switch to JSON output."),
+            ],
+        )
+        model = _make_model()
+        result = build_converse_request(request, model)
+
+        assert result["system"] == [{"text": "Base prompt."}, {"text": "Switch to JSON output."}]
+        assert [m["role"] for m in result["messages"]] == ["user"]
+
+    def test_system_message_block_content_flattened(self):
+        request = _make_request(
+            messages=[
+                Message(role="user", content="Hi"),
+                Message(
+                    role="system",
+                    content=[TextBlock(text="Line A"), TextBlock(text="Line B")],
+                ),
+            ]
+        )
+        model = _make_model()
+        result = build_converse_request(request, model)
+
+        assert result["system"] == [{"text": "Line A\nLine B"}]
+
     def test_inference_config(self):
         request = _make_request(temperature=0.7, top_p=0.9, stop_sequences=["END"])
         model = _make_model()

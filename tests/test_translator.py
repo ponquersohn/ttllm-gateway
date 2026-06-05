@@ -76,6 +76,38 @@ class TestToLangchainMessages:
         assert isinstance(msgs[1], AIMessage)
         assert isinstance(msgs[2], HumanMessage)
 
+    def test_mid_conversation_system_message(self):
+        # Anthropic mid-conversation system message → SystemMessage in place,
+        # keeping its position relative to the surrounding turns.
+        request = _make_request(
+            messages=[
+                Message(role="user", content="Hi"),
+                Message(role="system", content="Terse mode enabled."),
+                Message(role="user", content="Continue"),
+            ]
+        )
+        msgs = to_langchain_messages(request)
+        assert len(msgs) == 3
+        assert isinstance(msgs[0], HumanMessage)
+        assert isinstance(msgs[1], SystemMessage)
+        assert msgs[1].content == "Terse mode enabled."
+        assert isinstance(msgs[2], HumanMessage)
+
+    def test_mid_conversation_system_message_blocks(self):
+        request = _make_request(
+            messages=[
+                Message(role="user", content="Hi"),
+                Message(
+                    role="system",
+                    content=[TextBlock(text="Line A"), TextBlock(text="Line B")],
+                ),
+            ]
+        )
+        msgs = to_langchain_messages(request)
+        assert len(msgs) == 2
+        assert isinstance(msgs[1], SystemMessage)
+        assert msgs[1].content == "Line A\nLine B"
+
     def test_content_blocks(self):
         request = _make_request(
             messages=[
