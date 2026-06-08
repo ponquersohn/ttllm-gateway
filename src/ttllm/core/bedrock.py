@@ -40,6 +40,16 @@ _CLIENT_CACHE_MAX = 32
 _BEDROCK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="bedrock")
 
 
+def _cache_point() -> dict[str, Any]:
+    """Bedrock Converse cache breakpoint marker.
+
+    Inserted as a sibling element immediately after the block that carried an
+    Anthropic `cache_control` marker, telling Bedrock to cache the prefix up to
+    and including that block.
+    """
+    return {"cachePoint": {"type": "default"}}
+
+
 def get_boto3_client(llm_model: Any) -> Any:
     config = llm_model.config_json or {}
     cache_key = (
@@ -140,6 +150,8 @@ def _convert_message_to_bedrock(msg: Message) -> dict[str, Any]:
         converted = _convert_content_block_to_bedrock(block)
         if converted is not None:
             content_parts.append(converted)
+            if getattr(block, "cache_control", None):
+                content_parts.append(_cache_point())
 
     return {"role": msg.role, "content": content_parts}
 
@@ -166,6 +178,8 @@ def _convert_tools_to_bedrock(tools: list[ToolDefinition | ServerToolDefinition]
             input_schema["required"] = tool.input_schema.required
         spec["toolSpec"]["inputSchema"] = {"json": input_schema}
         tool_specs.append(spec)
+        if getattr(tool, "cache_control", None):
+            tool_specs.append(_cache_point())
     return tool_specs
 
 
@@ -187,7 +201,10 @@ def build_converse_request(request: MessagesRequest, llm_model: Any) -> dict[str
         if isinstance(request.system, str):
             system_blocks.append({"text": request.system})
         else:
-            system_blocks.extend({"text": block.text} for block in request.system)
+            for block in request.system:
+                system_blocks.append({"text": block.text})
+                if getattr(block, "cache_control", None):
+                    system_blocks.append(_cache_point())
     for msg in request.messages:
         if msg.role == "system":
             text = _message_to_system_text(msg)
