@@ -9,6 +9,7 @@ import httpx
 import typer
 
 from ttllm.cli._common import console
+from ttllm.cli.client import ssl_context
 
 app = typer.Typer()
 
@@ -58,7 +59,7 @@ def chat(
     try:
         if no_stream:
             body["stream"] = False
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=timeout, verify=ssl_context()) as client:
                 resp = client.post(f"{url}/anthropic/v1/messages", json=body, headers=headers)
             if resp.status_code != 200:
                 _handle_chat_error(resp, model, url)
@@ -73,7 +74,7 @@ def chat(
             body["stream"] = True
             input_tokens = 0
             output_tokens = 0
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=timeout, verify=ssl_context()) as client:
                 with client.stream("POST", f"{url}/anthropic/v1/messages", json=body, headers=headers) as resp:
                     if resp.status_code != 200:
                         resp.read()

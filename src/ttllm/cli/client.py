@@ -4,12 +4,27 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
+from functools import lru_cache
 from pathlib import Path
 
 import httpx
 
 SESSION_DIR = Path.home() / ".config" / "ttllm"
 SESSION_FILE = SESSION_DIR / "session.json"
+
+
+@lru_cache(maxsize=1)
+def ssl_context() -> ssl.SSLContext:
+    """Shared SSL context trusting the OS trust store.
+
+    httpx verifies TLS against certifi's bundle by default, which omits
+    corporate/internal CAs installed in the system store (e.g.
+    ``/etc/ssl/certs``). The stdlib default context loads the OS store,
+    so use it for all CLI requests. ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``
+    still override as usual.
+    """
+    return ssl.create_default_context()
 
 
 class TTLLMClient(httpx.Client):
@@ -54,6 +69,7 @@ class TTLLMClient(httpx.Client):
             base_url=base_url,
             headers={"Authorization": f"Bearer {token}"} if token else {},
             timeout=30,
+            verify=ssl_context(),
         )
 
     # --- Auth ---
@@ -65,6 +81,7 @@ class TTLLMClient(httpx.Client):
             f"{base_url}/auth/token",
             json={"email": email, "password": password},
             timeout=10,
+            verify=ssl_context(),
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -109,6 +126,7 @@ class TTLLMClient(httpx.Client):
             f"{self.base_url}auth/token/refresh",
             json={"refresh_token": session["refresh_token"]},
             timeout=10,
+            verify=ssl_context(),
         )
         if refresh_resp.status_code != 200:
             return resp
