@@ -83,6 +83,9 @@ class Permissions:
     AUDIT_VIEW = _define("audit.view", "View audit logs", "management")
     USAGE_VIEW = _define("usage.view", "View usage statistics", "management")
 
+    # --- Quota ---
+    QUOTA_MANAGE = _define("quota.manage", "Manage token quota limits", "management")
+
     # --- Server ---
     SERVER_STATUS = _define("server.status", "View server version and status", "management")
 

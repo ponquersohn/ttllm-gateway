@@ -11,13 +11,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ttllm.api.deps import AuthContext, DB, _authenticate, get_db, require_permission
+from ttllm.api.deps import AuthContext, DB, _authenticate, get_db, require_permission, require_quota
 from ttllm.config import settings
 from ttllm.core import gateway
 from ttllm.core.gateway import ServerToolError
 from ttllm.core.permissions import Permissions
 from ttllm.schemas.anthropic import MessagesRequest
-from ttllm.services import audit_service, model_service, secret_service
+from ttllm.services import audit_service, model_service, quota_service, secret_service
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,7 @@ async def create_message(
     request: Request,
     db: DB,
     ctx: AnthropicUser,
+    _quota: AuthContext = Depends(require_quota(auth_dep=get_anthropic_authenticated)),
 ):
     """Create a message using the Anthropic Messages API format."""
     request_id = uuid.uuid4()
@@ -116,6 +117,22 @@ async def create_message(
         "client_ip": request.client.host if request.client else None,
         "user_agent": request.headers.get("user-agent"),
     }
+
+    from ttllm.core.security_events import emit_security_event
+    from ttllm.core.injection_signals import scan_injection_signals
+
+    _signals = scan_injection_signals(body)
+    if _signals:
+        emit_security_event(
+            "llm.injection_signal",
+            "AML.T0054" if "prompt_extraction" in _signals else "AML.T0051",
+            user_id=ctx.user.id,
+            client_ip=request.client.host if request.client else None,
+            severity="warning",
+            model=body.model,
+            signals=_signals,
+            request_id=str(request_id),
+        )
 
     if body.stream:
         return await _handle_streaming(body, resolved_model, ctx.user, db, request_id, metadata)
@@ -142,6 +159,18 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
             response_body=result.response.model_dump() if settings.engine.log_request_bodies else None,
         )
 
+        await quota_service.debit_quota(db, user.id, result.input_tokens + result.output_tokens)
+        _total = result.input_tokens + result.output_tokens
+        if body.max_tokens >= 100_000 or _total >= 50_000:
+            from ttllm.core.security_events import emit_security_event
+            emit_security_event(
+                "llm.high_token_request", "AML.T0034",
+                user_id=user.id, client_ip=metadata.get("client_ip"),
+                severity="warning", model=llm_model.name,
+                max_tokens_requested=body.max_tokens,
+                input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                cost=str(result.cost), request_id=str(request_id),
+            )
         return JSONResponse(content=result.response.model_dump())
 
     except Exception as exc:
@@ -188,6 +217,19 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
                     metadata_json=metadata,
                     request_body=body.model_dump() if settings.engine.log_request_bodies else None,
                 )
+                await quota_service.debit_quota(db, user.id, stream_result.input_tokens + stream_result.output_tokens)
+                _total = stream_result.input_tokens + stream_result.output_tokens
+                if body.max_tokens >= 100_000 or _total >= 50_000:
+                    from ttllm.core.security_events import emit_security_event
+                    emit_security_event(
+                        "llm.high_token_request", "AML.T0034",
+                        user_id=user.id, client_ip=metadata.get("client_ip"),
+                        severity="warning", model=llm_model.name,
+                        max_tokens_requested=body.max_tokens,
+                        input_tokens=stream_result.input_tokens,
+                        output_tokens=stream_result.output_tokens,
+                        cost=str(stream_result.cost), request_id=str(request_id),
+                    )
 
         return StreamingResponse(
             event_generator(),

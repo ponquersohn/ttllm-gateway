@@ -45,7 +45,8 @@ from ttllm.schemas.auth import (
     UserPermissionAssign,
 )
 from ttllm.schemas.common import PaginatedResponse
-from ttllm.services import admin_audit_service, audit_service, auth_service, group_service, model_service, secret_service, usage_service, user_service
+from ttllm.schemas.quota import TokenLimitCreate, TokenLimitResponse, TokenLimitUpdate
+from ttllm.services import admin_audit_service, audit_service, auth_service, group_service, model_service, quota_service, secret_service, usage_service, user_service
 from ttllm.api.me import _build_whoami
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -346,6 +347,15 @@ async def create_model(
         action="model.create", resource_type="model", resource_id=model.id,
         details={"name": body.name},
     )
+    _cfg = body.config_json or {}
+    if "endpoint_url" in _cfg or "base_url" in _cfg:
+        from ttllm.core.security_events import emit_security_event
+        emit_security_event(
+            "model.network_target_set", "AML.T0049",
+            user_id=ctx.user.id, severity="warning",
+            model_name=getattr(body, "name", None),
+            endpoint_url=_cfg.get("endpoint_url"), base_url=_cfg.get("base_url"),
+        )
     return ModelResponse.model_validate(model)
 
 
@@ -366,6 +376,15 @@ async def update_model(
         action="model.update", resource_type="model", resource_id=model_id,
         details={"fields": list(body.model_dump(exclude_unset=True).keys())},
     )
+    _cfg = body.config_json or {}
+    if "endpoint_url" in _cfg or "base_url" in _cfg:
+        from ttllm.core.security_events import emit_security_event
+        emit_security_event(
+            "model.network_target_set", "AML.T0049",
+            user_id=ctx.user.id, severity="warning",
+            model_name=getattr(body, "name", None),
+            endpoint_url=_cfg.get("endpoint_url"), base_url=_cfg.get("base_url"),
+        )
     return ModelResponse.model_validate(model)
 
 
@@ -875,3 +894,98 @@ async def get_audit_log_body(
             detail={"type": "not_found", "message": "Audit log body not found"},
         )
     return AuditLogBodyResponse.model_validate(body)
+
+
+# --- Usage Limits (token quota) ---
+
+
+@router.get("/usage-limits", response_model=PaginatedResponse[TokenLimitResponse])
+async def list_usage_limits(
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_MANAGE)),
+    user_id: uuid.UUID | None = None,
+    group_id: uuid.UUID | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    limits, total = await quota_service.list_limits(
+        db, user_id=user_id, group_id=group_id, offset=offset, limit=limit
+    )
+    return PaginatedResponse(
+        items=[TokenLimitResponse.model_validate(lim) for lim in limits],
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post("/usage-limits", response_model=TokenLimitResponse, status_code=201)
+async def create_usage_limit(
+    body: TokenLimitCreate,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_MANAGE)),
+):
+    # Validate scope/target coherence.
+    if body.scope.value == "user" and body.user_id is None:
+        raise HTTPException(400, detail={"type": "invalid_request", "message": "scope=user requires user_id"})
+    if body.scope.value == "group" and body.group_id is None:
+        raise HTTPException(400, detail={"type": "invalid_request", "message": "scope=group requires group_id"})
+    limit = await quota_service.create_limit(
+        db,
+        scope=body.scope,
+        window_kind=body.window_kind,
+        token_cap=body.token_cap,
+        user_id=body.user_id,
+        group_id=body.group_id,
+    )
+    await admin_audit_service.log(
+        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        action="quota_limit.create", resource_type="quota_limit", resource_id=limit.id,
+        details={"scope": body.scope.value, "window_kind": body.window_kind.value, "token_cap": body.token_cap},
+    )
+    return TokenLimitResponse.model_validate(limit)
+
+
+@router.get("/usage-limits/{limit_id}", response_model=TokenLimitResponse)
+async def get_usage_limit(
+    limit_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_MANAGE)),
+):
+    limit = await quota_service.get_limit(db, limit_id)
+    if not limit:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Limit not found"})
+    return TokenLimitResponse.model_validate(limit)
+
+
+@router.patch("/usage-limits/{limit_id}", response_model=TokenLimitResponse)
+async def update_usage_limit(
+    limit_id: uuid.UUID,
+    body: TokenLimitUpdate,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_MANAGE)),
+):
+    limit = await quota_service.update_limit(db, limit_id, token_cap=body.token_cap)
+    if not limit:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Limit not found"})
+    await admin_audit_service.log(
+        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        action="quota_limit.update", resource_type="quota_limit", resource_id=limit_id,
+        details={"token_cap": body.token_cap},
+    )
+    return TokenLimitResponse.model_validate(limit)
+
+
+@router.delete("/usage-limits/{limit_id}", status_code=204)
+async def delete_usage_limit(
+    limit_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_MANAGE)),
+):
+    deleted = await quota_service.delete_limit(db, limit_id)
+    if not deleted:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Limit not found"})
+    await admin_audit_service.log(
+        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        action="quota_limit.delete", resource_type="quota_limit", resource_id=limit_id,
+    )

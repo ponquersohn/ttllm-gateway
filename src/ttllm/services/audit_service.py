@@ -54,6 +54,11 @@ async def log_request(
             response_body=response_body,
         )
         db.add(body)
+        from ttllm.core.security_events import emit_security_event
+        emit_security_event(
+            "audit.body_persisted", "AML.T0057", user_id=user_id, severity="info",
+            request_id=str(request_id), has_response=response_body is not None,
+        )
 
     await db.commit()
     await db.refresh(audit)

@@ -44,10 +44,17 @@ async def list_identity_providers():
 
 
 @router.post("/token", response_model=LoginTokenResponse)
-async def login(body: LoginRequest, db: DB):
+async def login(body: LoginRequest, request: Request, db: DB):
     """Authenticate with email + password, receive management JWT + refresh token."""
     user = await auth_service.authenticate_local(db, body.email, body.password)
     if not user:
+        from ttllm.core.security_events import emit_security_event
+        emit_security_event(
+            "auth.login_failed", "AML.T0052",
+            client_ip=request.client.host if request.client else None,
+            severity="warning",
+            email_attempted=body.email,
+        )
         raise HTTPException(
             status_code=401,
             detail={"type": "authentication_error", "message": "Invalid credentials"},

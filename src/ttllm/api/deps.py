@@ -44,6 +44,11 @@ async def _authenticate(token: str, db: AsyncSession) -> AuthContext:
     try:
         payload: TokenPayload = decode_token(token, jwt_config)
     except Exception:
+        from ttllm.core.security_events import emit_security_event
+        emit_security_event(
+            "auth.token_invalid", "AML.T0012", severity="warning",
+            reason="jwt_decode_failed",
+        )
         raise HTTPException(
             status_code=401,
             detail={"type": "authentication_error", "message": "Invalid or expired token"},
@@ -106,6 +111,18 @@ def require_permission(*perms: str, auth_dep=get_authenticated):
                         "message": f"Missing required permission: {p}",
                     },
                 )
+        return ctx
+    return checker
+
+
+def require_quota(auth_dep=get_authenticated):
+    """Dependency factory: enforce token quota for the calling user."""
+    async def checker(
+        ctx: AuthContext = Depends(auth_dep),
+        db: AsyncSession = Depends(get_db),
+    ) -> AuthContext:
+        from ttllm.services import quota_service  # local import avoids circular
+        await quota_service.check_quota(db, ctx.user.id)
         return ctx
     return checker
 

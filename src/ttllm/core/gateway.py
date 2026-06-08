@@ -70,6 +70,18 @@ async def invoke(
             "Remove server tool definitions and handle them client-side."
         )
 
+    if request.tools:
+        from ttllm.core.security_events import emit_security_event
+        _client_tool_names = [
+            t.name for t in request.tools if hasattr(t, "name")
+        ]
+        if _client_tool_names:
+            emit_security_event(
+                "llm.tools_bound", "AML.T0053", severity="info",
+                request_id=str(request_id),
+                tool_names=_client_tool_names, tool_count=len(_client_tool_names),
+            )
+
     start = time.monotonic()
 
     if llm_model.provider == "bedrock":

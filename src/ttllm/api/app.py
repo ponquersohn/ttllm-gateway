@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -89,6 +90,9 @@ def create_app() -> FastAPI:
     )
 
     app.add_middleware(_SecurityHeadersMiddleware)
+
+    # Security event logger — propagates to stdout for SIEM ingestion.
+    logging.getLogger("ttllm.security").setLevel(logging.INFO)
 
     # CORS — disable credentials when origins include wildcard
     origins = settings.engine.cors_origins
