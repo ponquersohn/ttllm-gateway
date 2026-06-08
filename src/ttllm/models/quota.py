@@ -5,7 +5,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ttllm.models import Base
@@ -46,6 +46,7 @@ class TokenLimit(Base):
         Enum(WindowKind, name="window_kind", values_callable=_enum_values), nullable=False
     )
     token_cap: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    window_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -930,6 +930,12 @@ async def create_usage_limit(
         raise HTTPException(400, detail={"type": "invalid_request", "message": "scope=user requires user_id"})
     if body.scope.value == "group" and body.group_id is None:
         raise HTTPException(400, detail={"type": "invalid_request", "message": "scope=group requires group_id"})
+    # Validate the referenced target exists before insert, so a bad id returns a
+    # clean 404 rather than a foreign-key 500 from the database.
+    if body.user_id is not None and not await user_service.get_user(db, body.user_id):
+        raise HTTPException(404, detail={"type": "not_found", "message": "User not found"})
+    if body.group_id is not None and not await group_service.get_group(db, body.group_id):
+        raise HTTPException(404, detail={"type": "not_found", "message": "Group not found"})
     limit = await quota_service.create_limit(
         db,
         scope=body.scope,
@@ -937,11 +943,17 @@ async def create_usage_limit(
         token_cap=body.token_cap,
         user_id=body.user_id,
         group_id=body.group_id,
+        window_seconds=body.window_seconds,
     )
     await admin_audit_service.log(
         db, actor_id=ctx.user.id, actor_jti=ctx.jti,
         action="quota_limit.create", resource_type="quota_limit", resource_id=limit.id,
-        details={"scope": body.scope.value, "window_kind": body.window_kind.value, "token_cap": body.token_cap},
+        details={
+            "scope": body.scope.value,
+            "window_kind": body.window_kind.value,
+            "token_cap": body.token_cap,
+            "window_seconds": body.window_seconds,
+        },
     )
     return TokenLimitResponse.model_validate(limit)
 
@@ -965,13 +977,13 @@ async def update_usage_limit(
     db: DB,
     ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_MANAGE)),
 ):
-    limit = await quota_service.update_limit(db, limit_id, token_cap=body.token_cap)
+    limit = await quota_service.update_limit(db, limit_id, **body.model_dump(exclude_unset=True))
     if not limit:
         raise HTTPException(404, detail={"type": "not_found", "message": "Limit not found"})
     await admin_audit_service.log(
         db, actor_id=ctx.user.id, actor_jti=ctx.jti,
         action="quota_limit.update", resource_type="quota_limit", resource_id=limit_id,
-        details={"token_cap": body.token_cap},
+        details=body.model_dump(exclude_unset=True),
     )
     return TokenLimitResponse.model_validate(limit)
 

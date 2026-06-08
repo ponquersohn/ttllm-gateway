@@ -15,10 +15,12 @@ class TokenLimitCreate(BaseModel):
     group_id: uuid.UUID | None = None
     window_kind: WindowKind
     token_cap: int = Field(..., gt=0, description="Maximum tokens allowed in this window.")
+    window_seconds: int | None = Field(None, gt=0, description="Window length in seconds; null uses the default for this window_kind.")
 
 
 class TokenLimitUpdate(BaseModel):
-    token_cap: int = Field(..., gt=0, description="New maximum tokens allowed in this window.")
+    token_cap: int | None = Field(None, gt=0, description="New maximum tokens allowed in this window.")
+    window_seconds: int | None = Field(None, gt=0, description="New window length in seconds.")
 
 
 class TokenLimitResponse(BaseModel):
@@ -30,6 +32,7 @@ class TokenLimitResponse(BaseModel):
     group_id: uuid.UUID | None
     window_kind: WindowKind
     token_cap: int
+    window_seconds: int | None
     created_at: datetime
     updated_at: datetime
 

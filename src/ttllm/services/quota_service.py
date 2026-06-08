@@ -19,10 +19,18 @@ WINDOW_DURATIONS: dict[WindowKind, timedelta] = {
 }
 
 
+def _duration_for(limit: TokenLimit) -> timedelta:
+    """Resolved window duration: the row's window_seconds if set, else the default."""
+    if limit.window_seconds is not None:
+        return timedelta(seconds=limit.window_seconds)
+    return WINDOW_DURATIONS[limit.window_kind]
+
+
 async def _resolve_limits(
     db: AsyncSession, user_id: uuid.UUID
-) -> dict[WindowKind, int]:
-    """Return {window_kind: token_cap} using user > min(group) > global precedence."""
+) -> dict[WindowKind, tuple[int, timedelta]]:
+    """Return {window_kind: (token_cap, duration)} using user > min(group) > global
+    precedence. Both cap and duration come from the same winning row."""
     group_ids_q = select(UserGroup.group_id).where(UserGroup.user_id == user_id)
     result = await db.execute(
         select(TokenLimit).where(
@@ -37,19 +45,20 @@ async def _resolve_limits(
     for lim in all_limits:
         by_window.setdefault(lim.window_kind, []).append(lim)
 
-    resolved: dict[WindowKind, int] = {}
+    resolved: dict[WindowKind, tuple[int, timedelta]] = {}
     for wk, lims in by_window.items():
         user_lim = next((l for l in lims if l.scope == LimitScope.USER), None)
         if user_lim:
-            resolved[wk] = user_lim.token_cap
+            resolved[wk] = (user_lim.token_cap, _duration_for(user_lim))
             continue
         group_lims = [l for l in lims if l.scope == LimitScope.GROUP]
         if group_lims:
-            resolved[wk] = min(l.token_cap for l in group_lims)
+            winner = min(group_lims, key=lambda l: l.token_cap)
+            resolved[wk] = (winner.token_cap, _duration_for(winner))
             continue
         global_lim = next((l for l in lims if l.scope == LimitScope.GLOBAL), None)
         if global_lim:
-            resolved[wk] = global_lim.token_cap
+            resolved[wk] = (global_lim.token_cap, _duration_for(global_lim))
     return resolved
 
 
@@ -81,12 +90,10 @@ async def check_quota(db: AsyncSession, user_id: uuid.UUID) -> None:
     )
     counters = {c.window_kind: c for c in result.scalars().all()}
 
-    for wk, cap in limits.items():
+    for wk, (cap, duration) in limits.items():
         counter = counters.get(wk)
         if not counter:
             continue  # no row yet — unlimited until first debit seeds it
-
-        duration = WINDOW_DURATIONS[wk]
 
         if counter.cooldown_until and now < counter.cooldown_until:
             raise _make_429(wk, counter.cooldown_until, now)
@@ -109,7 +116,13 @@ async def check_quota(db: AsyncSession, user_id: uuid.UUID) -> None:
 
 
 async def debit_quota(db: AsyncSession, user_id: uuid.UUID, tokens: int) -> None:
-    """Debit tokens post-request. Atomic upsert. Does NOT commit — caller owns txn."""
+    """Debit tokens post-request. Atomic upsert, committed on completion.
+
+    Called AFTER audit_service.log_request, which has already committed the audit
+    row and closed that transaction. The debit therefore opens its own transaction
+    and must commit it — otherwise the counter writes are discarded and quota is
+    never enforced.
+    """
     if tokens <= 0:
         return
     now = datetime.now(UTC)
@@ -117,8 +130,7 @@ async def debit_quota(db: AsyncSession, user_id: uuid.UUID, tokens: int) -> None
     if not limits:
         return
 
-    for wk, cap in limits.items():
-        duration = WINDOW_DURATIONS[wk]
+    for wk, (cap, duration) in limits.items():
         cutoff = now - duration
 
         # Atomic seed-or-increment with inline lazy reset if window expired.
@@ -158,7 +170,9 @@ async def debit_quota(db: AsyncSession, user_id: uuid.UUID, tokens: int) -> None
                 .where(UsageCounter.user_id == user_id, UsageCounter.window_kind == wk)
                 .values(cooldown_until=next_reset)
             )
-        # No db.commit() here — log_request (the caller) owns the commit
+    # Commit the counter writes — log_request already committed and closed its
+    # transaction before this runs, so the debit owns its own commit.
+    await db.commit()
 
 
 # --- Admin CRUD (used by /admin/usage-limits endpoints) ---
@@ -171,6 +185,7 @@ async def create_limit(
     token_cap: int,
     user_id: uuid.UUID | None = None,
     group_id: uuid.UUID | None = None,
+    window_seconds: int | None = None,
 ) -> TokenLimit:
     """Create a new token limit row."""
     limit = TokenLimit(
@@ -179,6 +194,7 @@ async def create_limit(
         token_cap=token_cap,
         user_id=user_id,
         group_id=group_id,
+        window_seconds=window_seconds,
     )
     db.add(limit)
     await db.commit()
@@ -221,15 +237,15 @@ async def list_limits(
 async def update_limit(
     db: AsyncSession,
     limit_id: uuid.UUID,
-    token_cap: int,
+    **fields,
 ) -> TokenLimit | None:
-    """Update a limit's token_cap. Clears any cooldowns on the affected scope so a
-    raised cap takes effect immediately (RedTeam F8)."""
+    """Update a limit's token_cap and/or window_seconds. Clears cooldowns on the
+    affected scope so a changed cap/window takes effect immediately."""
     limit = await db.get(TokenLimit, limit_id)
     if not limit:
         return None
-    limit.token_cap = token_cap
-    # Clear cooldowns for the affected window so a raised cap is honored at once.
+    for key, value in fields.items():
+        setattr(limit, key, value)
     cooldown_clear = (
         update(UsageCounter)
         .where(UsageCounter.window_kind == limit.window_kind)
