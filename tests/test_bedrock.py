@@ -799,3 +799,101 @@ class TestStreamConverse:
 
         types = [_parse_sse(e)[0] for e in collected]
         assert "error" in types
+
+    @pytest.mark.asyncio
+    async def test_text_block_opened_without_bedrock_start(self):
+        """Bedrock omits contentBlockStart/Stop for text blocks; the gateway must
+        still emit content_block_start before the first delta and a matching
+        content_block_stop before message_delta, or clients raise
+        'Content block not found' and fall back to non-streaming."""
+        from ttllm.core.bedrock import stream_converse
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Hello"}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": " world"}}},
+            {"messageStop": {"stopReason": "end_turn"}},
+            {"metadata": {"usage": {"inputTokens": 5, "outputTokens": 2}}},
+        ]
+        model = _make_model()
+
+        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+
+            collected = [ev async for ev in stream_converse(_make_request(), model, uuid.uuid4())]
+
+        types = [_parse_sse(e)[0] for e in collected]
+        # A content_block_start for index 0 precedes any delta on it.
+        first_delta = types.index("content_block_delta")
+        first_start = types.index("content_block_start")
+        assert first_start < first_delta
+        start_data = _parse_sse(collected[first_start])[1]
+        assert start_data["index"] == 0
+        assert start_data["content_block"]["type"] == "text"
+        # The lazily-opened block is closed before message_delta.
+        assert "content_block_stop" in types
+        assert types.index("content_block_stop") < types.index("message_delta")
+
+    @pytest.mark.asyncio
+    async def test_reasoning_block_opened_without_bedrock_start(self):
+        """A reasoning delta with no preceding start opens a thinking block."""
+        from ttllm.core.bedrock import stream_converse
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {
+                "reasoningContent": {"text": "thinking..."}
+            }}},
+            {"messageStop": {"stopReason": "end_turn"}},
+            {"metadata": {"usage": {"inputTokens": 5, "outputTokens": 2}}},
+        ]
+        model = _make_model()
+
+        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+
+            collected = [ev async for ev in stream_converse(_make_request(), model, uuid.uuid4())]
+
+        start = next(_parse_sse(e) for e in collected if e.startswith("event: content_block_start"))
+        assert start[1]["content_block"]["type"] == "thinking"
+
+    @pytest.mark.asyncio
+    async def test_explicit_tool_use_start_not_double_opened(self):
+        """When Bedrock does send contentBlockStart (tool use), the gateway must
+        not emit a second, synthetic start for the same index."""
+        from ttllm.core.bedrock import stream_converse
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockStart": {"contentBlockIndex": 0, "start": {
+                "toolUse": {"toolUseId": "tu_1", "name": "get_weather"}
+            }}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {
+                "toolUse": {"input": '{"city":'}
+            }}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {
+                "toolUse": {"input": '"NYC"}'}
+            }}},
+            {"contentBlockStop": {"contentBlockIndex": 0}},
+            {"messageStop": {"stopReason": "tool_use"}},
+            {"metadata": {"usage": {"inputTokens": 5, "outputTokens": 2}}},
+        ]
+        model = _make_model()
+
+        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+
+            collected = [ev async for ev in stream_converse(_make_request(), model, uuid.uuid4())]
+
+        types = [_parse_sse(e)[0] for e in collected]
+        # Exactly one start and one stop for the single tool-use block.
+        assert types.count("content_block_start") == 1
+        assert types.count("content_block_stop") == 1
+        start = next(_parse_sse(e) for e in collected if e.startswith("event: content_block_start"))
+        assert start[1]["content_block"]["type"] == "tool_use"

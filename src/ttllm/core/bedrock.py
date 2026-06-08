@@ -389,6 +389,14 @@ async def stream_converse(
     cache_read = 0
     cache_write = 0
     stop_reason = "end_turn"
+    # Block indices we've opened with a content_block_start but not yet closed
+    # with a content_block_stop. Bedrock Converse only sends contentBlockStart
+    # for tool-use blocks; for text/reasoning it jumps straight to
+    # contentBlockDelta. The Anthropic wire protocol requires a
+    # content_block_start before any delta for that index, so we open the block
+    # lazily on the first delta when Bedrock omits it — and make sure to close
+    # any still-open block before message_delta.
+    open_blocks: set[int] = set()
 
     try:
         async for event in _aiter_event_stream(stream, loop):
@@ -407,6 +415,7 @@ async def stream_converse(
                 cbs = event["contentBlockStart"]
                 idx = cbs.get("contentBlockIndex", block_index)
                 block_index = idx
+                open_blocks.add(idx)
                 start_block = cbs.get("start", {})
 
                 if "toolUse" in start_block:
@@ -433,6 +442,20 @@ async def stream_converse(
                 cbd = event["contentBlockDelta"]
                 idx = cbd.get("contentBlockIndex", block_index)
                 delta = cbd.get("delta", {})
+
+                # Open the block if Bedrock didn't send a contentBlockStart for it
+                # (it omits the start event for text and reasoning blocks).
+                if idx not in open_blocks:
+                    open_blocks.add(idx)
+                    if "reasoningContent" in delta:
+                        opening_block = {"type": "thinking", "thinking": "", "signature": ""}
+                    else:
+                        opening_block = {"type": "text", "text": ""}
+                    yield _sse_event("content_block_start", {
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": opening_block,
+                    })
 
                 if "text" in delta:
                     yield _sse_event("content_block_delta", {
@@ -463,6 +486,7 @@ async def stream_converse(
 
             elif "contentBlockStop" in event:
                 idx = event["contentBlockStop"].get("contentBlockIndex", block_index)
+                open_blocks.discard(idx)
                 yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": idx})
                 block_index = idx + 1
 
@@ -484,6 +508,12 @@ async def stream_converse(
             usage_out["output_tokens"] = output_tokens
             usage_out["cache_read_tokens"] = cache_read
             usage_out["cache_write_tokens"] = cache_write
+
+    # Close any block we opened lazily that Bedrock never sent a stop for, so
+    # the client never sees message_delta with a content block still open.
+    for idx in sorted(open_blocks):
+        yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": idx})
+    open_blocks.clear()
 
     yield _sse_event("message_delta", {
         "type": "message_delta",

@@ -8,22 +8,46 @@ import logging
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
 from starlette.staticfiles import StaticFiles
 
 from ttllm import __version__
 from ttllm.config import settings
 
 
-class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Cache-Control"] = "no-store"
-        return response
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "1; mode=block",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Cache-Control": "no-store",
+}
+
+
+class _SecurityHeadersMiddleware:
+    """Pure ASGI middleware that injects security headers on every response.
+
+    Implemented at the ASGI layer (rather than via BaseHTTPMiddleware) so it does
+    not wrap responses through an extra task/cancel scope, which buffers
+    StreamingResponse output and breaks incremental SSE streaming.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(raw=message["headers"])
+                for key, value in _SECURITY_HEADERS.items():
+                    headers[key] = value
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 def _authenticated_docs_html(variant: str, title: str) -> HTMLResponse:
