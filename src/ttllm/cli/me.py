@@ -149,6 +149,7 @@ def me_usage_summary(
     console.print(f"  Total input tokens: {data['total_input_tokens']}")
     console.print(f"  Total output tokens: {data['total_output_tokens']}")
     console.print(f"  Avg latency: {data['avg_latency_ms']}ms")
+    console.print(f"  Total cost: ${data.get('total_cost', '0')}")
 
 
 @usage_app.command("costs")

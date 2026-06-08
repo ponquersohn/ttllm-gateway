@@ -54,3 +54,47 @@ def test_streaming_message(client: httpx.Client, gateway_user_token: str, bedroc
     delta = next(d for t, d in events if t == "message_delta")
     assert delta["usage"]["output_tokens"] >= 1
     assert delta["usage"]["input_tokens"] >= 1
+
+
+def test_streaming_persists_response_body_and_cost(
+    client: httpx.Client, admin_headers: dict, gateway_user_token: str, bedrock_model: dict
+):
+    """Streamed requests now persist the assembled response body to audit_log_bodies and
+    record an authoritative cost + provider_metadata, matching non-streaming."""
+    marker = "persist this stream"
+    with client.stream(
+        "POST",
+        "/anthropic/v1/messages",
+        headers={"x-api-key": gateway_user_token},
+        json={
+            "model": bedrock_model["name"],
+            "messages": [{"role": "user", "content": marker}],
+            "max_tokens": 128,
+            "stream": True,
+        },
+    ) as resp:
+        assert resp.status_code == 200, resp.read().decode()
+        resp.read()
+
+    # Find the audit row for this streamed request.
+    logs = client.get(
+        "/admin/audit-logs",
+        headers=admin_headers,
+        params={"model_id": bedrock_model["id"], "limit": 50},
+    )
+    assert logs.status_code == 200, logs.text
+    items = logs.json()["items"]
+    assert items
+    latest = items[0]
+    assert latest["total_cost"] is not None
+    assert latest["provider_metadata"]["provider"] == "bedrock"
+
+    # The assembled streamed response was saved as response_body.
+    body = client.get(f"/admin/audit-logs/{latest['id']}/body", headers=admin_headers)
+    assert body.status_code == 200, body.text
+    response_body = body.json()["response_body"]
+    assert response_body is not None
+    text = "".join(
+        b.get("text", "") for b in response_body.get("content", []) if b.get("type") == "text"
+    )
+    assert marker in text

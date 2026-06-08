@@ -165,6 +165,7 @@ class AuditLogResponse(BaseModel):
     status_code: int
     error_message: str | None
     metadata_json: dict | None
+    provider_metadata: dict | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -185,6 +186,7 @@ class UsageSummaryResponse(BaseModel):
     total_input_tokens: int
     total_output_tokens: int
     avg_latency_ms: float
+    total_cost: str = "0"
 
 
 class CostBreakdownItem(BaseModel):

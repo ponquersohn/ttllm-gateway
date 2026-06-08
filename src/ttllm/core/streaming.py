@@ -18,10 +18,16 @@ async def format_sse_stream(
     model_name: str,
     request_id: uuid.UUID,
     token_usage: dict[str, int] | None = None,
+    state: Any = None,
 ) -> AsyncIterator[str]:
     """Convert a LangChain astream into Anthropic SSE events.
 
     Yields SSE-formatted strings: "event: <type>\\ndata: <json>\\n\\n"
+
+    ``token_usage`` (a plain dict) and ``state`` (a duck-typed accumulator, e.g.
+    ``LangChainState``) are optional sinks for the final token counts. When ``state`` is
+    provided, the assembled text/tool content and stop reason are accumulated onto it so the
+    full response can be rebuilt after the stream ends.
     """
     input_tokens = 0
     output_tokens = 0
@@ -31,6 +37,10 @@ async def format_sse_stream(
     has_tool_use = False
     # Track tool calls we've already started (by id)
     started_tool_calls: set[str] = set()
+    # Rebuild accumulators for the full response.
+    text_acc = ""
+    tool_acc: dict[str, dict[str, str]] = {}
+    tool_order: list[str] = []
 
     # message_start event
     start_message = MessagesResponse(
@@ -59,6 +69,7 @@ async def format_sse_stream(
                         text += part
 
         if text:
+            text_acc += text
             if not has_text_block:
                 has_text_block = True
                 yield _sse_event("content_block_start", {
@@ -91,6 +102,8 @@ async def format_sse_stream(
 
                     started_tool_calls.add(tc_id)
                     has_tool_use = True
+                    tool_order.append(tc_id)
+                    tool_acc[tc_id] = {"name": tc_name or "", "args": ""}
                     yield _sse_event("content_block_start", {
                         "type": "content_block_start",
                         "index": block_index,
@@ -98,6 +111,8 @@ async def format_sse_stream(
                     })
 
                 if tc_args:
+                    if tc_id and tc_id in tool_acc:
+                        tool_acc[tc_id]["args"] += tc_args
                     yield _sse_event("content_block_delta", {
                         "type": "content_block_delta",
                         "index": block_index,
@@ -113,10 +128,24 @@ async def format_sse_stream(
             if isinstance(input_details, dict):
                 cache_read = input_details.get("cache_read", cache_read)
 
+    stop_reason = "tool_use" if has_tool_use else "end_turn"
+
     # Store final token counts for the caller
     if token_usage is not None:
         token_usage["input_tokens"] = input_tokens
         token_usage["output_tokens"] = output_tokens
+
+    # Accumulate the rebuilt response onto the state, if provided.
+    if state is not None:
+        state.input_tokens = input_tokens
+        state.output_tokens = output_tokens
+        state.cache_read_tokens = cache_read
+        state.stop_reason = stop_reason
+        state.text = text_acc
+        state.tool_calls = [
+            {"id": tid, "name": tool_acc[tid]["name"], "args": tool_acc[tid]["args"]}
+            for tid in tool_order
+        ]
 
     # Close the last open content block
     if has_text_block or has_tool_use:
@@ -124,8 +153,6 @@ async def format_sse_stream(
             "type": "content_block_stop",
             "index": block_index,
         })
-
-    stop_reason = "tool_use" if has_tool_use else "end_turn"
 
     # message_delta with final usage
     yield _sse_event("message_delta", {
