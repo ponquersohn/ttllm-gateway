@@ -269,6 +269,27 @@ def _parse_bedrock_content_block(block: dict[str, Any]) -> ContentBlock:
     return TextBlock(text=json.dumps(block))
 
 
+def _assembled_to_content_blocks(assembled: dict[int, dict[str, Any]]) -> list[ContentBlock]:
+    """Rebuild Anthropic content blocks from the per-index builders accumulated while
+    streaming. Tool-use input arrives as a JSON string and is parsed back to a dict."""
+    blocks: list[ContentBlock] = []
+    for idx in sorted(assembled):
+        b = assembled[idx]
+        kind = b.get("type")
+        if kind == "text":
+            blocks.append(TextBlock(text=b.get("text", "")))
+        elif kind == "tool_use":
+            raw = b.get("input_json", "") or ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except (ValueError, TypeError):
+                parsed = {}
+            blocks.append(ToolUseBlock(id=b.get("id", ""), name=b.get("name", ""), input=parsed))
+        elif kind == "thinking":
+            blocks.append(ThinkingBlock(thinking=b.get("thinking", ""), signature=b.get("signature", "")))
+    return blocks
+
+
 def parse_converse_response(
     response: dict[str, Any], model_name: str, request_id: uuid.UUID
 ) -> tuple[MessagesResponse, int, int]:
@@ -317,15 +338,21 @@ def parse_converse_response(
     )
 
 
-async def invoke_converse(
-    request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
-) -> tuple[MessagesResponse, int, int]:
+async def _converse_raw(
+    request: MessagesRequest, llm_model: Any
+) -> dict[str, Any]:
+    """Run the blocking Bedrock Converse call on the executor; return the raw response."""
     client = get_boto3_client(llm_model)
     params = build_converse_request(request, llm_model)
 
     loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(_BEDROCK_EXECUTOR, lambda: client.converse(**params))
+    return await loop.run_in_executor(_BEDROCK_EXECUTOR, lambda: client.converse(**params))
 
+
+async def invoke_converse(
+    request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
+) -> tuple[MessagesResponse, int, int]:
+    response = await _converse_raw(request, llm_model)
     return parse_converse_response(response, llm_model.name, request_id)
 
 
@@ -366,7 +393,15 @@ async def stream_converse(
     llm_model: Any,
     request_id: uuid.UUID,
     usage_out: dict[str, int] | None = None,
+    state: Any = None,
 ) -> AsyncIterator[str]:
+    """Stream a Bedrock Converse response as Anthropic SSE events.
+
+    ``usage_out`` (a plain dict) and ``state`` (a duck-typed accumulator, e.g.
+    ``BedrockState``) are both optional sinks for the final token counts. When ``state`` is
+    provided, the assembled content blocks and stop reason are accumulated onto it as well,
+    so the full response can be rebuilt after the stream ends.
+    """
     client = get_boto3_client(llm_model)
     params = build_converse_request(request, llm_model)
 
@@ -388,7 +423,11 @@ async def stream_converse(
     output_tokens = 0
     cache_read = 0
     cache_write = 0
+    raw_usage: dict[str, Any] = {}
     stop_reason = "end_turn"
+    # Per-index builders for rebuilding the full response from the streamed deltas.
+    # Each entry: {"type": "text"|"tool_use"|"thinking", ...accumulators...}.
+    assembled: dict[int, dict[str, Any]] = {}
     # Block indices we've opened with a content_block_start but not yet closed
     # with a content_block_stop. Bedrock Converse only sends contentBlockStart
     # for tool-use blocks; for text/reasoning it jumps straight to
@@ -420,18 +459,21 @@ async def stream_converse(
 
                 if "toolUse" in start_block:
                     tu = start_block["toolUse"]
+                    assembled[idx] = {"type": "tool_use", "id": tu.get("toolUseId", ""), "name": tu.get("name", ""), "input_json": ""}
                     yield _sse_event("content_block_start", {
                         "type": "content_block_start",
                         "index": idx,
                         "content_block": {"type": "tool_use", "id": tu.get("toolUseId", ""), "name": tu.get("name", ""), "input": {}},
                     })
                 elif "reasoningContent" in start_block:
+                    assembled[idx] = {"type": "thinking", "thinking": "", "signature": ""}
                     yield _sse_event("content_block_start", {
                         "type": "content_block_start",
                         "index": idx,
                         "content_block": {"type": "thinking", "thinking": "", "signature": ""},
                     })
                 else:
+                    assembled[idx] = {"type": "text", "text": ""}
                     yield _sse_event("content_block_start", {
                         "type": "content_block_start",
                         "index": idx,
@@ -451,6 +493,7 @@ async def stream_converse(
                         opening_block = {"type": "thinking", "thinking": "", "signature": ""}
                     else:
                         opening_block = {"type": "text", "text": ""}
+                    assembled[idx] = dict(opening_block)
                     yield _sse_event("content_block_start", {
                         "type": "content_block_start",
                         "index": idx,
@@ -458,12 +501,14 @@ async def stream_converse(
                     })
 
                 if "text" in delta:
+                    assembled.setdefault(idx, {"type": "text", "text": ""})["text"] += delta["text"]
                     yield _sse_event("content_block_delta", {
                         "type": "content_block_delta",
                         "index": idx,
                         "delta": {"type": "text_delta", "text": delta["text"]},
                     })
                 elif "toolUse" in delta:
+                    assembled.setdefault(idx, {"type": "tool_use", "id": "", "name": "", "input_json": ""})["input_json"] += delta["toolUse"].get("input", "")
                     yield _sse_event("content_block_delta", {
                         "type": "content_block_delta",
                         "index": idx,
@@ -472,12 +517,14 @@ async def stream_converse(
                 elif "reasoningContent" in delta:
                     rc = delta["reasoningContent"]
                     if "text" in rc:
+                        assembled.setdefault(idx, {"type": "thinking", "thinking": "", "signature": ""})["thinking"] += rc["text"]
                         yield _sse_event("content_block_delta", {
                             "type": "content_block_delta",
                             "index": idx,
                             "delta": {"type": "thinking_delta", "thinking": rc["text"]},
                         })
                     elif "signature" in rc:
+                        assembled.setdefault(idx, {"type": "thinking", "thinking": "", "signature": ""})["signature"] = rc["signature"]
                         yield _sse_event("content_block_delta", {
                             "type": "content_block_delta",
                             "index": idx,
@@ -495,6 +542,7 @@ async def stream_converse(
 
             elif "metadata" in event:
                 usage = event["metadata"].get("usage", {})
+                raw_usage = usage
                 input_tokens = usage.get("inputTokens", 0)
                 output_tokens = usage.get("outputTokens", 0)
                 cache_read = usage.get("cacheReadInputTokens", 0)
@@ -508,6 +556,14 @@ async def stream_converse(
             usage_out["output_tokens"] = output_tokens
             usage_out["cache_read_tokens"] = cache_read
             usage_out["cache_write_tokens"] = cache_write
+        if state is not None:
+            state.input_tokens = input_tokens
+            state.output_tokens = output_tokens
+            state.cache_read_tokens = cache_read
+            state.cache_write_tokens = cache_write
+            state.raw_usage = raw_usage
+            state.stop_reason = stop_reason
+            state.content_blocks = _assembled_to_content_blocks(assembled)
 
     # Close any block we opened lazily that Bedrock never sent a stop for, so
     # the client never sees message_delta with a content block still open.

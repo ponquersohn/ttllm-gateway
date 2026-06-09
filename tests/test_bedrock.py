@@ -690,7 +690,9 @@ class TestStreamConverse:
         assert delta[1]["usage"]["cache_creation_input_tokens"] == 30
 
     @pytest.mark.asyncio
-    async def test_collector_populated_through_gateway(self):
+    async def test_state_populated_through_gateway(self):
+        from decimal import Decimal
+
         from ttllm.core import gateway
 
         events = [
@@ -713,25 +715,32 @@ class TestStreamConverse:
             mock_client.converse_stream.return_value = _make_stream_response(events)
             mock_get_client.return_value = mock_client
 
-            sse_stream, collector = await gateway.stream(_make_request(), model, uuid.uuid4())
+            state, sse_stream = gateway.stream(_make_request(), model, uuid.uuid4())
             async for _ in sse_stream:
                 pass
 
-        assert collector.input_tokens == 100
-        assert collector.output_tokens == 40
-        assert collector.cache_read_tokens == 50
-        assert collector.cache_write_tokens == 30
+        assert state.input_tokens == 100
+        assert state.output_tokens == 40
+        assert state.cache_read_tokens == 50
+        assert state.cache_write_tokens == 30
 
-        # finalize is called exactly once (by the API layer); verify the math
-        result = collector.finalize()
-        from decimal import Decimal
         expected = (
             (Decimal("100") / 1000) * Decimal("0.003")
             + (Decimal("40") / 1000) * Decimal("0.015")
             + (Decimal("50") / 1000) * Decimal("0.0003")
             + (Decimal("30") / 1000) * Decimal("0.00375")
         )
-        assert result.cost == expected
+        assert state.get_cost() == expected
+
+        # The state rebuilt the full response from the streamed deltas.
+        response = state.get_response()
+        assert response.content[0].text == "Hi"
+        assert response.stop_reason == "end_turn"
+
+        # The metadata blob carries the raw payload and the cost breakdown.
+        meta = state.get_metadata()
+        assert meta["cost"]["total"] == str(expected)
+        assert meta["raw"]["cacheReadInputTokens"] == 50
 
     @pytest.mark.asyncio
     async def test_incremental_yielding(self):

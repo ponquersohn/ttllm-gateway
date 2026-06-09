@@ -123,41 +123,59 @@ async def create_message(
         return await _handle_invoke(body, resolved_model, ctx.user, db, request_id, metadata)
 
 
+async def _finalize(state, body, llm_model, user, db, request_id, metadata):
+    """Write the audit row from a completed provider state.
+
+    Shared by both the streaming and non-streaming paths — the only difference is when the
+    state has been populated. The state is opaque here: we read its getters and token fields
+    and never reach inside it. ``get_metadata()`` includes the provider-computed latency.
+    """
+    provider_metadata = state.get_metadata()
+    await audit_service.log_request(
+        db,
+        user_id=user.id,
+        model_id=llm_model.id,
+        request_id=request_id,
+        input_tokens=state.input_tokens,
+        output_tokens=state.output_tokens,
+        total_cost=str(state.get_cost()),
+        latency_ms=provider_metadata.get("latency_ms", 0),
+        status_code=200,
+        metadata_json=metadata,
+        provider_metadata=provider_metadata,
+        request_body=body.model_dump() if settings.engine.log_request_bodies else None,
+        response_body=state.get_response().model_dump() if settings.engine.log_request_bodies else None,
+    )
+
+
+async def _log_error(exc, llm_model, user, db, request_id, metadata):
+    status, error_type, message = _classify_provider_error(exc)
+    logger.exception("Request %s failed (type=%s)", request_id, error_type)
+    await audit_service.log_request(
+        db,
+        user_id=user.id,
+        model_id=llm_model.id,
+        request_id=request_id,
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=0,
+        status_code=status,
+        error_message=str(exc),
+        metadata_json=metadata,
+    )
+    return status, error_type, message
+
+
 async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
     try:
-        result = await gateway.invoke(body, llm_model, request_id)
-
-        await audit_service.log_request(
-            db,
-            user_id=user.id,
-            model_id=llm_model.id,
-            request_id=request_id,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            total_cost=str(result.cost),
-            latency_ms=result.latency_ms,
-            status_code=200,
-            metadata_json=metadata,
-            request_body=body.model_dump() if settings.engine.log_request_bodies else None,
-            response_body=result.response.model_dump() if settings.engine.log_request_bodies else None,
-        )
-
-        return JSONResponse(content=result.response.model_dump())
+        state = await gateway.invoke(body, llm_model, request_id)
+        response = state.get_response()
+        await _finalize(state, body, llm_model, user, db, request_id, metadata)
+        return JSONResponse(content=response.model_dump())
 
     except Exception as exc:
-        status, error_type, message = _classify_provider_error(exc)
-        logger.exception("Invoke failed for request %s (type=%s)", request_id, error_type)
-        await audit_service.log_request(
-            db,
-            user_id=user.id,
-            model_id=llm_model.id,
-            request_id=request_id,
-            input_tokens=0,
-            output_tokens=0,
-            latency_ms=0,
-            status_code=status,
-            error_message=str(exc),
-            metadata_json=metadata,
+        status, error_type, message = await _log_error(
+            exc, llm_model, user, db, request_id, metadata
         )
         raise HTTPException(
             status_code=status,
@@ -167,27 +185,14 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
 
 async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
     try:
-        sse_stream, collector = await gateway.stream(body, llm_model, request_id)
+        state, sse_stream = gateway.stream(body, llm_model, request_id)
 
         async def event_generator():
             try:
                 async for event in sse_stream:
                     yield event
             finally:
-                stream_result = collector.finalize()
-                await audit_service.log_request(
-                    db,
-                    user_id=user.id,
-                    model_id=llm_model.id,
-                    request_id=request_id,
-                    input_tokens=stream_result.input_tokens,
-                    output_tokens=stream_result.output_tokens,
-                    total_cost=str(stream_result.cost),
-                    latency_ms=stream_result.latency_ms,
-                    status_code=200,
-                    metadata_json=metadata,
-                    request_body=body.model_dump() if settings.engine.log_request_bodies else None,
-                )
+                await _finalize(state, body, llm_model, user, db, request_id, metadata)
 
         return StreamingResponse(
             event_generator(),
@@ -199,19 +204,8 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
             },
         )
     except Exception as exc:
-        status, error_type, message = _classify_provider_error(exc)
-        logger.exception("Stream setup failed for request %s (type=%s)", request_id, error_type)
-        await audit_service.log_request(
-            db,
-            user_id=user.id,
-            model_id=llm_model.id,
-            request_id=request_id,
-            input_tokens=0,
-            output_tokens=0,
-            latency_ms=0,
-            status_code=status,
-            error_message=str(exc),
-            metadata_json=metadata,
+        status, error_type, message = await _log_error(
+            exc, llm_model, user, db, request_id, metadata
         )
         raise HTTPException(
             status_code=status,

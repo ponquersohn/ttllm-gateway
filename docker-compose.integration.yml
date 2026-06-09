@@ -42,6 +42,9 @@ services:
       TTLLM_AUTH__JWT__SECRET_KEY: integration-test-secret
       TTLLM_ADMIN_PASSWORD: admin
       TTLLM_PROVIDER__DEFAULT_REGION: us-east-1
+      # Persist request/response bodies so integration tests can assert that streamed
+      # responses are now saved to audit_log_bodies.
+      TTLLM_ENGINE__LOG_REQUEST_BODIES: "true"
     depends_on:
       db:
         condition: service_healthy

@@ -25,6 +25,7 @@ async def log_request(
     status_code: int = 200,
     error_message: str | None = None,
     metadata_json: dict | None = None,
+    provider_metadata: dict | None = None,
     request_body: dict | None = None,
     response_body: dict | None = None,
     log_bodies: bool | None = None,
@@ -41,6 +42,7 @@ async def log_request(
         status_code=status_code,
         error_message=error_message,
         metadata_json=metadata_json,
+        provider_metadata=provider_metadata,
     )
     db.add(audit)
     await db.flush()
