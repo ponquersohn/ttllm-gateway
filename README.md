@@ -443,6 +443,14 @@ ttllm models create \
 
 All four are also accepted by `ttllm models update` with the same flags.
 
+To update individual keys within `config_json` without replacing the entire object, pass `--merge-config`:
+
+```bash
+ttllm models update claude-sonnet --config '{"region":"eu-west-1"}' --merge-config
+```
+
+This shallow-merges the provided keys into the existing config. Without `--merge-config`, `--config` replaces the entire config object.
+
 The total cost of each request is computed by its provider (the cost shape is provider-specific — Bedrock bills input + output + cache read/write) and stored authoritatively on the audit row, alongside a `provider_metadata` JSONB blob holding the raw usage payload and the per-component cost breakdown. Usage aggregation (`ttllm usage summary` / `costs`) sums the stored totals rather than recomputing, so reported costs always match what was recorded — including cache and any future cost dimensions. `ttllm usage summary` reports an overall `total_cost`.
 
 ## Bedrock Model Config

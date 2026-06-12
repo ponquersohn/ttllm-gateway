@@ -79,6 +79,9 @@ async def update_model(
     model = await db.get(LLMModel, model_id)
     if not model:
         return None
+    if kwargs.pop("merge_config", False) and "config_json" in kwargs:
+        merged = {**(model.config_json or {}), **kwargs.pop("config_json")}
+        setattr(model, "config_json", merged)
     _MUTABLE_FIELDS = {"name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "cache_read_cost_per_1k", "cache_write_cost_per_1k", "is_active", "match_pattern"}
     for key, value in kwargs.items():
         if key in _MUTABLE_FIELDS and value is not None:

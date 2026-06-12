@@ -103,6 +103,7 @@ class ModelUpdate(BaseModel):
     provider: str | None = None
     provider_model_id: str | None = None
     config_json: dict[str, Any] | None = None
+    merge_config: bool = False
     input_cost_per_1k: Decimal | None = None
     output_cost_per_1k: Decimal | None = None
     cache_read_cost_per_1k: Decimal | None = None
