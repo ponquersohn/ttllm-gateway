@@ -47,6 +47,39 @@ def _token_counts(body: dict, reply: str) -> tuple[int, int]:
     return max(1, in_chars // 4), max(1, len(reply) // 4)
 
 
+def _has_cache_point(body: dict) -> bool:
+    """True if the request carries any Bedrock cachePoint marker.
+
+    TTLLM inserts ``{"cachePoint": {"type": ...}}`` into the system / tools /
+    message-content arrays when the client sends Anthropic ``cache_control``.
+    Detecting it here lets the fake report cache-read tokens, so the integration
+    suite can prove the marker survived the full translate path end-to-end.
+    """
+    def _scan(items: list) -> bool:
+        return any(isinstance(i, dict) and "cachePoint" in i for i in items or [])
+
+    if _scan(body.get("system", [])):
+        return True
+    tool_cfg = body.get("toolConfig") or {}
+    if _scan(tool_cfg.get("tools", [])):
+        return True
+    for msg in body.get("messages", []):
+        if _scan(msg.get("content", [])):
+            return True
+    return False
+
+
+def _cache_counts(body: dict, in_tokens: int) -> tuple[int, int]:
+    """Return (cache_read, cache_write) the fake should report.
+
+    Deterministic stand-in for Bedrock's behavior: when a cachePoint is present,
+    attribute the input tokens to a cache read so tests can assert reads > 0.
+    """
+    if _has_cache_point(body):
+        return in_tokens, 0
+    return 0, 0
+
+
 @app.get("/")
 async def health() -> dict:
     return {"status": "ok"}
@@ -57,14 +90,15 @@ async def converse(model_id: str, request: Request) -> dict:
     body = await request.json()
     reply = _reply_text(body)
     in_tokens, out_tokens = _token_counts(body, reply)
+    cache_read, cache_write = _cache_counts(body, in_tokens)
     return {
         "output": {"message": {"role": "assistant", "content": [{"text": reply}]}},
         "stopReason": "end_turn",
         "usage": {
             "inputTokens": in_tokens,
             "outputTokens": out_tokens,
-            "cacheReadInputTokens": 0,
-            "cacheWriteInputTokens": 0,
+            "cacheReadInputTokens": cache_read,
+            "cacheWriteInputTokens": cache_write,
         },
     }
 

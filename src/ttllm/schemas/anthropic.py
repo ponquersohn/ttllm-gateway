@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 class TextBlock(BaseModel):
     type: Literal["text"] = "text"
     text: str
+    cache_control: dict[str, Any] | None = None
 
 
 class ImageSource(BaseModel):
@@ -111,6 +112,7 @@ class ToolDefinition(BaseModel):
     name: str
     description: str = ""
     input_schema: ToolInputSchema
+    cache_control: dict[str, Any] | None = None
 
 
 class ServerToolDefinition(BaseModel):

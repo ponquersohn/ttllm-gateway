@@ -906,3 +906,75 @@ class TestStreamConverse:
         assert types.count("content_block_stop") == 1
         start = next(_parse_sse(e) for e in collected if e.startswith("event: content_block_start"))
         assert start[1]["content_block"]["type"] == "tool_use"
+
+
+class TestCachePoint:
+    def test_system_block_cache_control_emits_cache_point(self):
+        request = _make_request(
+            system=[
+                TextBlock(text="Big shared prefix.", cache_control={"type": "ephemeral"}),
+            ]
+        )
+        result = build_converse_request(request, _make_model())
+
+        assert result["system"] == [
+            {"text": "Big shared prefix."},
+            {"cachePoint": {"type": "default"}},
+        ]
+
+    def test_tool_cache_control_emits_cache_point(self):
+        tools = [
+            ToolDefinition(
+                name="search",
+                description="Search",
+                input_schema=ToolInputSchema(),
+                cache_control={"type": "ephemeral"},
+            ),
+        ]
+        request = _make_request(tools=tools)
+        result = build_converse_request(request, _make_model())
+
+        tool_specs = result["toolConfig"]["tools"]
+        assert len(tool_specs) == 2
+        assert tool_specs[0]["toolSpec"]["name"] == "search"
+        assert tool_specs[1] == {"cachePoint": {"type": "default"}}
+
+    def test_message_text_block_cache_control_emits_cache_point(self):
+        messages = [
+            Message(
+                role="user",
+                content=[
+                    TextBlock(text="Cache me.", cache_control={"type": "ephemeral"}),
+                    TextBlock(text="But not me."),
+                ],
+            )
+        ]
+        request = _make_request(messages=messages)
+        result = build_converse_request(request, _make_model())
+
+        content = result["messages"][0]["content"]
+        assert content == [
+            {"text": "Cache me."},
+            {"cachePoint": {"type": "default"}},
+            {"text": "But not me."},
+        ]
+
+    def test_no_cache_control_emits_no_cache_point(self):
+        tools = [
+            ToolDefinition(name="search", description="", input_schema=ToolInputSchema()),
+        ]
+        request = _make_request(
+            system=[TextBlock(text="prefix")],
+            tools=tools,
+            messages=[
+                Message(role="user", content=[TextBlock(text="hello")]),
+            ],
+        )
+        result = build_converse_request(request, _make_model())
+
+        def _has_cache_point(arr):
+            return any("cachePoint" in el for el in arr)
+
+        assert not _has_cache_point(result["system"])
+        assert not _has_cache_point(result["toolConfig"]["tools"])
+        assert not _has_cache_point(result["messages"][0]["content"])
