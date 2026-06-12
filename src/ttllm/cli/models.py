@@ -136,7 +136,8 @@ def models_update(
     name: Optional[str] = typer.Option(None, "--name", help="New display name"),
     provider: Optional[str] = typer.Option(None, "--provider", help="New provider"),
     provider_model_id: Optional[str] = typer.Option(None, "--provider-model-id", help="New provider model ID"),
-    config: Optional[str] = typer.Option(None, "--config", help="New JSON config (replaces existing)"),
+    config: Optional[str] = typer.Option(None, "--config", help="JSON config (replaces existing; use --merge-config to shallow-merge)"),
+    merge_config: bool = typer.Option(False, "--merge-config", help="Merge into existing config instead of replacing"),
     input_cost: Optional[float] = typer.Option(None, "--input-cost", help="Cost per 1K input tokens"),
     output_cost: Optional[float] = typer.Option(None, "--output-cost", help="Cost per 1K output tokens"),
     cache_read_cost: Optional[float] = typer.Option(None, "--cache-read-cost", help="Cost per 1K cache-read input tokens"),
@@ -145,6 +146,9 @@ def models_update(
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat model argument as UUID"),
 ):
     """Update an existing model."""
+    if merge_config and config is None:
+        console.print("[red]--merge-config requires --config[/red]")
+        raise typer.Exit(1)
     body: dict = {}
     if name is not None:
         body["name"] = name
@@ -154,6 +158,8 @@ def models_update(
         body["provider_model_id"] = provider_model_id
     if config is not None:
         body["config_json"] = json.loads(config)
+        if merge_config:
+            body["merge_config"] = True
     if input_cost is not None:
         body["input_cost_per_1k"] = str(input_cost)
     if output_cost is not None:
