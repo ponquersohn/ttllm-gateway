@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncIterator
 
 import boto3
+from botocore.config import Config as BotocoreConfig
 
 from ttllm.config import settings
 from ttllm.schemas.anthropic import (
@@ -35,6 +36,13 @@ from ttllm.schemas.anthropic import (
 _CLIENT_CACHE: OrderedDict[str, Any] = OrderedDict()
 _CLIENT_CACHE_MAX = 32
 
+# Bedrock prompt prefill on large contexts can exceed botocore's 60s default read
+# timeout before the first stream event arrives, so the default here is deliberately
+# generous. Both timeouts are per-model tunable via config_json.
+_DEFAULT_READ_TIMEOUT = 300
+_DEFAULT_CONNECT_TIMEOUT = 10
+_DEFAULT_MAX_ATTEMPTS = 3
+
 # Dedicated thread pool for blocking boto3 Bedrock calls, so they don't
 # contend with the asyncio default executor (which other libraries share).
 _BEDROCK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="bedrock")
@@ -42,9 +50,13 @@ _BEDROCK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="bedro
 
 def get_boto3_client(llm_model: Any) -> Any:
     config = llm_model.config_json or {}
+    read_timeout = config.get("read_timeout", _DEFAULT_READ_TIMEOUT)
+    connect_timeout = config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
+    max_attempts = config.get("retry_max_attempts", _DEFAULT_MAX_ATTEMPTS)
     cache_key = (
         f"{config.get('aws_profile', '')}:{config.get('aws_access_key_id', '')}:"
-        f"{config.get('region', '')}:{config.get('endpoint_url', '')}"
+        f"{config.get('region', '')}:{config.get('endpoint_url', '')}:"
+        f"{read_timeout}:{connect_timeout}:{max_attempts}"
     )
 
     if cache_key in _CLIENT_CACHE:
@@ -63,7 +75,13 @@ def get_boto3_client(llm_model: Any) -> Any:
 
     # endpoint_url lets the client target a non-default endpoint (VPC interface
     # endpoint, LocalStack, or a test double). Omitted → boto3 uses the AWS default.
-    client_kwargs: dict[str, Any] = {}
+    client_kwargs: dict[str, Any] = {
+        "config": BotocoreConfig(
+            read_timeout=read_timeout,
+            connect_timeout=connect_timeout,
+            retries={"mode": "standard", "max_attempts": max_attempts},
+        ),
+    }
     if config.get("endpoint_url"):
         client_kwargs["endpoint_url"] = config["endpoint_url"]
 

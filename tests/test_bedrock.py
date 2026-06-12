@@ -504,6 +504,59 @@ class TestGetBoto3Client:
         _, kwargs = mock_session.return_value.client.call_args
         assert "endpoint_url" not in kwargs
 
+    def test_default_timeouts_applied(self):
+        from ttllm.core import bedrock
+
+        bedrock._CLIENT_CACHE.clear()
+        model = _make_model(config_json={"region": "us-east-1"})
+
+        with patch("ttllm.core.bedrock.boto3.Session") as mock_session:
+            bedrock.get_boto3_client(model)
+
+        _, kwargs = mock_session.return_value.client.call_args
+        boto_config = kwargs["config"]
+        assert boto_config.read_timeout == bedrock._DEFAULT_READ_TIMEOUT
+        assert boto_config.connect_timeout == bedrock._DEFAULT_CONNECT_TIMEOUT
+        assert boto_config.retries == {"mode": "standard", "max_attempts": bedrock._DEFAULT_MAX_ATTEMPTS}
+
+    def test_config_json_timeout_overrides(self):
+        from ttllm.core import bedrock
+
+        bedrock._CLIENT_CACHE.clear()
+        model = _make_model(config_json={
+            "region": "us-east-1",
+            "read_timeout": 600,
+            "connect_timeout": 5,
+            "retry_max_attempts": 1,
+        })
+
+        with patch("ttllm.core.bedrock.boto3.Session") as mock_session:
+            bedrock.get_boto3_client(model)
+
+        _, kwargs = mock_session.return_value.client.call_args
+        boto_config = kwargs["config"]
+        assert boto_config.read_timeout == 600
+        assert boto_config.connect_timeout == 5
+        assert boto_config.retries == {"mode": "standard", "max_attempts": 1}
+
+    def test_distinct_timeouts_get_distinct_cached_clients(self):
+        from ttllm.core import bedrock
+
+        bedrock._CLIENT_CACHE.clear()
+        base = {"region": "us-east-1"}
+        model_default = _make_model(config_json=base)
+        model_tuned = _make_model(config_json={**base, "read_timeout": 600})
+
+        with patch("ttllm.core.bedrock.boto3.Session") as mock_session:
+            # A fresh mock per client() call, so identity reflects cache behavior.
+            mock_session.return_value.client.side_effect = lambda *a, **k: MagicMock()
+            client_a = bedrock.get_boto3_client(model_default)
+            client_b = bedrock.get_boto3_client(model_tuned)
+            client_a_again = bedrock.get_boto3_client(model_default)
+
+        assert client_a is not client_b
+        assert client_a is client_a_again
+
 
 class TestToolChoice:
     def test_tool_choice_none_omits_tool_config(self):
