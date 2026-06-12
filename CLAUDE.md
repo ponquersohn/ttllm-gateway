@@ -36,6 +36,7 @@ ttllm users list|show|create|update|delete
 ttllm models list|show|create|update|delete|assign|unassign
 ttllm groups list|show|create|update|delete
 ttllm tokens list|show|create|delete
+ttllm rules list|show|create|update|delete
 ttllm secrets list|show|create|update|delete
 ttllm usage summary|costs [--user] [--model] [--since] [--until]
 ttllm audit-logs [--user] [--model] [--limit]
@@ -93,7 +94,7 @@ src/ttllm/
 ```
 
 ## Database
-12 tables: `users`, `llm_models`, `model_assignments`, `group_model_assignments`, `audit_logs`, `audit_log_bodies`, `groups`, `group_permissions`, `user_permissions`, `user_groups`, `gateway_tokens`, `refresh_tokens`, `secrets`
+13 tables: `users`, `llm_models`, `model_assignments`, `group_model_assignments`, `audit_logs`, `audit_log_bodies`, `groups`, `group_permissions`, `user_permissions`, `user_groups`, `gateway_tokens`, `refresh_tokens`, `secrets`, `rules`
 - JWT-based auth with OIDC identity provider support (e.g. Entra ID)
 - RBAC via groups and direct user permission assignments
 - Gateway tokens are registered in DB for revocation; refresh tokens stored as SHA-256 hashes

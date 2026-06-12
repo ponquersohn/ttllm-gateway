@@ -16,11 +16,13 @@ from ttllm.config import settings
 from ttllm.core import gateway
 from ttllm.core.gateway import ServerToolError
 from ttllm.core.permissions import Permissions
+from ttllm.core.rules import ActionType
 from ttllm.schemas.anthropic import MessagesRequest
-from ttllm.services import audit_service, model_service, secret_service
+from ttllm.services import audit_service, model_service, rules_service, secret_service
 
 logger = logging.getLogger(__name__)
 
+# Map Bedrock/AWS error codes to Anthropic-compatible error types and HTTP status codes.
 _BEDROCK_ERROR_MAP: dict[str, tuple[int, str]] = {
     "ThrottlingException": (529, "overloaded_error"),
     "ModelTimeoutException": (529, "overloaded_error"),
@@ -99,6 +101,38 @@ async def create_message(
     """Create a message using the Anthropic Messages API format."""
     request_id = uuid.uuid4()
 
+    # Evaluate rules engine
+    active_rules = await rules_service.get_active_rules(db)
+    if active_rules:
+        rule_ctx = rules_service.build_request_context(
+            request=body,
+            headers={k.lower(): v for k, v in request.headers.items()},
+            user_id=str(ctx.user.id),
+        )
+        # Precompute moving-window quota aggregates into rule_ctx.metadata so the
+        # pure core engine can evaluate quota conditions and render block messages.
+        await rules_service.populate_quota_metadata(db, active_rules, rule_ctx)
+        outcome = rules_service.evaluate_rules(active_rules, rule_ctx)
+        if outcome:
+            if outcome.action_type == ActionType.BLOCK:
+                headers = (
+                    {"Retry-After": str(outcome.retry_after_seconds)}
+                    if outcome.retry_after_seconds
+                    else None
+                )
+                raise HTTPException(
+                    status_code=outcome.block_status,
+                    detail={"type": "policy_error", "message": outcome.block_message},
+                    headers=headers,
+                )
+            elif outcome.action_type == ActionType.REROUTE:
+                body = body.model_copy(update={"model": outcome.rerouted_model})
+            elif outcome.action_type == ActionType.REWRITE:
+                body = rules_service.apply_rewrite_to_request(
+                    body, outcome.rewrite_pattern, outcome.rewrite_replacement
+                )
+
+    # Check model access
     llm_model = await model_service.get_model_for_user(db, ctx.user.id, body.model)
     if not llm_model:
         raise HTTPException(

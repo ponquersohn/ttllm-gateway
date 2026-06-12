@@ -75,6 +75,12 @@ class Permissions:
     SECRET_MODIFY = _define("secret.modify", "Update secret values", "management")
     SECRET_DELETE = _define("secret.delete", "Delete secrets", "management")
 
+    # --- Rule ---
+    RULE_VIEW = _define("rule.view", "View rules", "management")
+    RULE_CREATE = _define("rule.create", "Create rules", "management")
+    RULE_MODIFY = _define("rule.modify", "Update rules", "management")
+    RULE_DELETE = _define("rule.delete", "Delete rules", "management")
+
     # --- Token ---
     TOKEN_CREATE = _define("token.create", "Generate gateway tokens", "management")
     TOKEN_DELETE = _define("token.delete", "Revoke gateway tokens", "management")

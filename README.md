@@ -134,6 +134,7 @@ dev:
     listen_port: 8000
     cors_origins: ["*"]
     log_request_bodies: false
+    rules_cache_ttl_seconds: 30          # how long each worker caches active rules before reloading
   auth:
     allowed_redirect_origins:
       - "https://myapp.example.com"
@@ -154,6 +155,174 @@ dev:
   secrets:
     encryption_key: "env://TTLLM_SECRETS_ENCRYPTION_KEY"
 ```
+
+## Rules Engine
+
+The gateway includes a rules engine that evaluates incoming requests before model resolution. Rules are evaluated by weight (highest first); the first matching rule's action is applied.
+
+Rules are managed via the admin API (`/admin/rules`) and CLI (`ttllm rules`). Each worker caches active rules in memory. The worker that serves a create/update/delete reloads immediately; other workers pick up the change within `engine.rules_cache_ttl_seconds` (default 30s), so a write may take up to that long to take effect across all workers.
+
+> 📖 For the full reference — conditions, actions, the quota system, message templating, and operational notes — see [docs/rules-engine.md](docs/rules-engine.md).
+
+### Permissions
+
+Rules management requires dedicated permissions:
+
+- `rule.view` — List and show rules
+- `rule.create` — Create new rules
+- `rule.modify` — Update existing rules
+- `rule.delete` — Delete rules
+
+### API
+
+```bash
+# List rules
+GET /admin/rules
+
+# Create a rule
+POST /admin/rules
+
+# Get/update/delete a specific rule
+GET    /admin/rules/{rule_id}
+PATCH  /admin/rules/{rule_id}
+DELETE /admin/rules/{rule_id}
+```
+
+### CLI
+
+```bash
+ttllm rules list
+ttllm rules show <name>
+ttllm rules create --name <name> --conditions '<json>' --action '<json>' --weight 50
+ttllm rules update <name> --weight 100 --enabled true
+ttllm rules delete <name>
+```
+
+### Example: Create a rule via API
+
+```json
+POST /admin/rules
+{
+  "name": "reroute-large-to-haiku",
+  "weight": 50,
+  "description": "Route large requests to a cheaper model",
+  "conditions": {
+    "logic": "and",
+    "conditions": [
+      {"type": "parameter", "field": "model", "operator": "exact", "value": "dynamic_model"},
+      {"type": "function", "field": "count_tokens", "operator": "gt", "value": 50000}
+    ]
+  },
+  "action": {"type": "reroute", "target": "claude-haiku"}
+}
+```
+
+**More examples:**
+
+```json
+// Block jailbreak attempts (weight: 100 = high priority)
+{
+  "name": "block-jailbreak",
+  "weight": 100,
+  "conditions": {
+    "logic": "or",
+    "conditions": [
+      {"type": "content", "field": "messages", "operator": "regex", "value": "(?i)(ignore previous instructions|DAN mode)"}
+    ]
+  },
+  "action": {"type": "block", "message": "Request rejected: content policy violation"}
+}
+
+// Mask SSN patterns in content
+{
+  "name": "mask-ssn",
+  "weight": 80,
+  "conditions": {
+    "logic": "and",
+    "conditions": [
+      {"type": "content", "field": "messages", "operator": "regex", "value": "\\d{3}-\\d{2}-\\d{4}"}
+    ]
+  },
+  "action": {"type": "rewrite", "pattern": "\\d{3}-\\d{2}-\\d{4}", "replacement": "[SSN-REDACTED]"}
+}
+
+// Throttle spend: block with 429 once a user exceeds $5 in any rolling 60s window
+{
+  "name": "cost-throttle-60s",
+  "weight": 100,
+  "conditions": {
+    "logic": "and",
+    "conditions": [
+      {"type": "quota", "field": "cost", "operator": "gt", "value": 5.0, "window": 60}
+    ]
+  },
+  "action": {
+    "type": "block",
+    "status_code": 429,
+    "message": "Spend limit hit ({{quota.cost.value}}/{{quota.cost.threshold}} USD in 60s). Retry in {{quota.cost.next_free}}s."
+  }
+}
+```
+
+### Condition Types
+
+| Type | Field | Description |
+|------|-------|-------------|
+| `parameter` | `model`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stream` | Match on request parameters |
+| `header` | any header name | Match on HTTP headers (case-insensitive) |
+| `content` | `messages` or `system` | Match on message/system text |
+| `function` | `count_tokens`, `message_length`, `keyword_count` | Match on computed values |
+| `quota` | `cost`, `tokens`, `requests` | Match on the user's usage in a rolling time window (see below) |
+
+### Quota Conditions
+
+A `quota` condition compares the caller's recent usage against a threshold over a
+moving time window, computed in real time from the audit log (only successful
+requests count). It takes two extra fields:
+
+- `window` (required) — window size in seconds (e.g. `60` = last 60 seconds).
+- `per` (optional) — scope dimensions; currently only `["model"]`, which limits
+  the aggregate to the request's model (exact name match). Default scope is
+  per-user. Combine a `quota` condition with normal conditions in an `and` group
+  for finer targeting.
+
+`field` selects the measure: `cost` (USD spent), `tokens` (input+output), or
+`requests` (count). Use the numeric operators (`gt`/`gte`/`lt`/`lte`).
+
+### Operators
+
+`exact`, `regex`, `contains`, `in`, `gt`, `lt`, `gte`, `lte`
+
+All conditions support `negate: true` to invert the match.
+
+### Actions
+
+| Action | Fields | Description |
+|--------|--------|-------------|
+| `reroute` | `target` | Change target model name before resolution |
+| `block` | `message`, `status_code` | Reject the request. `status_code` defaults to 403; set `429` for rate limiting (a `Retry-After` header is added when a quota window is involved) |
+| `allow` | — | Explicitly pass through (skip remaining rules) |
+| `rewrite` | `pattern`, `replacement` | Regex replace in message content |
+
+### Block Message Templating
+
+A `block` action's `message` supports `{{ dotted.path }}` substitution against
+values published by the matched rule's conditions. Quota conditions expose a
+`quota.<measure>` namespace with `value`, `threshold`, `window`, and `next_free`
+(seconds until the oldest contributing usage ages out of the window — also used
+for the `Retry-After` header). Unknown references are left untouched. Only dotted
+lookups are supported — no expressions or filters. Example:
+
+```
+"Spend limit hit ({{quota.cost.value}}/{{quota.cost.threshold}} USD). Retry in {{quota.cost.next_free}}s."
+```
+
+> Note: a rule with two quota conditions on the *same* measure but different
+> windows is not yet supported (they share one `quota.<measure>` namespace).
+
+### Condition Groups
+
+Conditions can be composed with `logic: and` or `logic: or`, and groups can be nested for complex rules.
 
 ## Secrets Management
 

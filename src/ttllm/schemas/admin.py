@@ -199,6 +199,69 @@ class CostBreakdownItem(BaseModel):
 
 
 
+# --- Rules ---
+
+
+class RuleCreate(BaseModel):
+    name: str
+    description: str | None = None
+    weight: int = 0
+    enabled: bool = True
+    conditions: dict[str, Any]
+    action: dict[str, Any]
+
+    @field_validator("conditions")
+    @classmethod
+    def validate_conditions(cls, v: dict[str, Any]) -> dict[str, Any]:
+        from ttllm.schemas.rules import validate_condition_group_dict
+        return validate_condition_group_dict(v)
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: dict[str, Any]) -> dict[str, Any]:
+        from ttllm.schemas.rules import validate_action_dict
+        return validate_action_dict(v)
+
+
+class RuleUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    weight: int | None = None
+    enabled: bool | None = None
+    conditions: dict[str, Any] | None = None
+    action: dict[str, Any] | None = None
+
+    @field_validator("conditions")
+    @classmethod
+    def validate_conditions(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is None:
+            return None
+        from ttllm.schemas.rules import validate_condition_group_dict
+        return validate_condition_group_dict(v)
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is None:
+            return None
+        from ttllm.schemas.rules import validate_action_dict
+        return validate_action_dict(v)
+
+
+class RuleResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str | None
+    weight: int
+    enabled: bool
+    conditions: dict[str, Any]
+    action: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 # --- Secrets ---
 
 
