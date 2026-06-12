@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ttllm.config import settings
 from ttllm.core.rules import (
     Action,
     ActionType,
@@ -24,27 +27,48 @@ from ttllm.core.rules import (
     RuleOutcome,
     apply_action,
     evaluate,
+    iter_conditions,
 )
 from ttllm.models.rule import Rule
 from ttllm.schemas.anthropic import MessagesRequest
+from ttllm.services import usage_service
 
 logger = logging.getLogger(__name__)
 
 
 # --- Cache ---
+#
+# The cache is per-process. With multiple workers (ECS runs several uvicorn
+# workers), a CRUD write only invalidates the cache of the worker that served
+# it; the others pick up the change within ``rules_cache_ttl_seconds`` via the
+# TTL refresh below. ``_cache_loaded_at`` is a ``time.monotonic()`` timestamp
+# (immune to wall-clock skew); ``None`` means the cache has never been loaded
+# and is distinct from "loaded, but zero active rules".
 
 _rules_cache: list[CoreRule] = []
+_cache_loaded_at: float | None = None
 _cache_lock = asyncio.Lock()
 
 
+def _cache_is_stale() -> bool:
+    if _cache_loaded_at is None:
+        return True
+    return (time.monotonic() - _cache_loaded_at) >= settings.engine.rules_cache_ttl_seconds
+
+
 async def get_active_rules(db: AsyncSession) -> list[CoreRule]:
-    if not _rules_cache:
+    if _cache_is_stale():
         await refresh_rules_cache(db)
     return _rules_cache
 
 
 async def refresh_rules_cache(db: AsyncSession) -> None:
+    global _cache_loaded_at
     async with _cache_lock:
+        # Re-check under the lock: a concurrent caller may have refreshed while
+        # we waited, so we avoid a thundering herd of redundant queries.
+        if not _cache_is_stale():
+            return
         result = await db.execute(
             select(Rule).where(Rule.enabled == True).order_by(Rule.weight.desc())  # noqa: E712
         )
@@ -57,11 +81,14 @@ async def refresh_rules_cache(db: AsyncSession) -> None:
                 logger.exception("Failed to convert rule '%s' to core, skipping", r.name)
         _rules_cache.clear()
         _rules_cache.extend(core_rules)
+        _cache_loaded_at = time.monotonic()
         logger.info("Rules cache refreshed: %d active rules loaded", len(core_rules))
 
 
 def invalidate_rules_cache() -> None:
+    global _cache_loaded_at
     _rules_cache.clear()
+    _cache_loaded_at = None
 
 
 # --- CRUD ---
@@ -164,6 +191,8 @@ def _convert_condition_group_dict(data: dict) -> ConditionGroup:
                 operator=MatchOp(item.get("operator", "exact")),
                 value=item["value"],
                 negate=item.get("negate", False),
+                window=item.get("window"),
+                per=tuple(item.get("per", [])),
             ))
     return ConditionGroup(logic=logic, conditions=tuple(conditions))
 
@@ -173,7 +202,11 @@ def _convert_action_dict(data: dict) -> Action:
     if action_type == ActionType.REROUTE:
         return Action(type=action_type, target=data["target"])
     if action_type == ActionType.BLOCK:
-        return Action(type=action_type, target=data.get("message", "Request blocked by policy"))
+        return Action(
+            type=action_type,
+            target=data.get("message", "Request blocked by policy"),
+            status_code=data.get("status_code", 403),
+        )
     if action_type == ActionType.REWRITE:
         return Action(type=action_type, pattern=data["pattern"], replacement=data["replacement"])
     return Action(type=action_type)
@@ -210,7 +243,77 @@ def evaluate_rules(rules: list[CoreRule], ctx: RequestContext) -> RuleOutcome | 
     if matched_rule is None:
         return None
     logger.info("Rule '%s' matched (weight=%d)", matched_rule.name, matched_rule.weight)
-    return apply_action(matched_rule)
+    return apply_action(matched_rule, ctx)
+
+
+async def populate_quota_metadata(
+    db: AsyncSession,
+    rules: list[CoreRule],
+    ctx: RequestContext,
+) -> None:
+    """Precompute moving-window quota aggregates and inject them into ``ctx.metadata``.
+
+    Keeps the pure core engine free of DB/clock access: the quota matcher and the
+    block-message renderer only read ``ctx.metadata["quota"][<measure>]``. Runs at
+    most one aggregate query per distinct ``(measure, window, per)`` across all
+    rules, and returns immediately (zero queries) when no quota condition exists.
+    """
+    # Collect distinct quota specs and remember each measure's threshold for the
+    # template namespace. A spec is keyed by (measure, window, per) so the same
+    # measure over different windows yields separate queries.
+    specs: dict[tuple, dict[str, Any]] = {}
+    for rule in rules:
+        for cond in iter_conditions(rule.conditions):
+            if cond.type != ConditionType.QUOTA or cond.window is None:
+                continue
+            per = _resolve_per(cond.per, ctx)
+            key = (cond.field, cond.window, tuple(sorted(per.items())))
+            specs.setdefault(key, {
+                "measure": cond.field,
+                "window": cond.window,
+                "per": per,
+                "threshold": cond.value,
+            })
+
+    if not specs:
+        return
+
+    now = datetime.now(timezone.utc)
+    quota_ns: dict[str, Any] = ctx.metadata.setdefault("quota", {})
+    for spec in specs.values():
+        agg = await usage_service.get_window_aggregate(
+            db,
+            uuid.UUID(ctx.user_id),
+            measure=spec["measure"],
+            window_seconds=spec["window"],
+            per=spec["per"] or None,
+            now=now,
+        )
+        quota_ns[spec["measure"]] = {
+            "value": agg["value"],
+            "threshold": spec["threshold"],
+            "window": spec["window"],
+            "next_free": _next_free(agg["oldest_ts"], spec["window"], now),
+            "per": spec["per"],
+        }
+
+
+def _resolve_per(per: tuple[str, ...], ctx: RequestContext) -> dict[str, Any]:
+    """Map a quota condition's ``per`` dimensions to concrete filter values."""
+    resolved: dict[str, Any] = {}
+    if "model" in per:
+        resolved["model"] = ctx.model
+    return resolved
+
+
+def _next_free(oldest_ts: datetime | None, window: int, now: datetime) -> int:
+    """Seconds until the oldest contributing row ages out of the window."""
+    if oldest_ts is None:
+        return 0
+    if oldest_ts.tzinfo is None:
+        oldest_ts = oldest_ts.replace(tzinfo=timezone.utc)
+    seconds = (oldest_ts + timedelta(seconds=window) - now).total_seconds()
+    return max(0, int(seconds))
 
 
 def apply_rewrite_to_request(

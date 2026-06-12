@@ -24,6 +24,7 @@ class ConditionType(str, Enum):
     PARAMETER = "parameter"
     CONTENT = "content"
     FUNCTION = "function"
+    QUOTA = "quota"
 
 
 class ActionType(str, Enum):
@@ -45,6 +46,10 @@ class Condition:
     operator: MatchOp
     value: Any
     negate: bool = False
+    # Quota conditions only: the moving-window size (seconds) and the dimensions
+    # the aggregate is scoped by (e.g. ("model",)). Ignored for other types.
+    window: int | None = None
+    per: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,7 @@ class Action:
     target: str | None = None
     pattern: str | None = None
     replacement: str | None = None
+    status_code: int = 403
 
 
 @dataclass(frozen=True)
@@ -95,6 +101,7 @@ class RuleOutcome:
     block_message: str = ""
     rewrite_pattern: str | None = None
     rewrite_replacement: str | None = None
+    retry_after_seconds: int | None = None
 
 
 # --- Matcher registry ---
@@ -202,6 +209,19 @@ def _match_function(condition: Condition, ctx: RequestContext) -> bool:
     return _compare(computed, condition.operator, condition.value)
 
 
+@register_matcher(ConditionType.QUOTA)
+def _match_quota(condition: Condition, ctx: RequestContext) -> bool:
+    # The service layer precomputes the moving-window aggregate into
+    # ``ctx.metadata["quota"][<measure>]``; this matcher only reads it (pure, no
+    # I/O). ``condition.field`` is the measure (cost/tokens/requests),
+    # ``condition.value`` the threshold. A missing namespace means the service
+    # found no data, which compares as 0 (never trips a ``gt`` threshold).
+    quota = ctx.metadata.get("quota", {})
+    bucket = quota.get(condition.field, {})
+    current = bucket.get("value", 0)
+    return _compare(current, condition.operator, condition.value)
+
+
 # --- Built-in functions ---
 
 @register_function("count_tokens")
@@ -255,7 +275,56 @@ def evaluate(rules: list[Rule], ctx: RequestContext) -> Rule | None:
     return None
 
 
-def apply_action(rule: Rule) -> RuleOutcome:
+def iter_conditions(group: ConditionGroup):
+    """Yield every leaf Condition in a (possibly nested) ConditionGroup."""
+    for cond in group.conditions:
+        if isinstance(cond, ConditionGroup):
+            yield from iter_conditions(cond)
+        else:
+            yield cond
+
+
+# --- Message templating ---
+
+_TEMPLATE_VAR = re.compile(r"\{\{\s*([\w.]+)\s*\}\}")
+
+
+def render_template(text: str, namespace: dict[str, Any]) -> str:
+    """Substitute ``{{ dotted.path }}`` references against ``namespace``.
+
+    A deliberately tiny, safe substitution — only dotted dict lookups, no
+    expressions, filters, or attribute access (unlike ``str.format``). An
+    unresolved reference is left in place untouched.
+    """
+    def _sub(match: re.Match) -> str:
+        current: Any = namespace
+        for part in match.group(1).split("."):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return match.group(0)
+        return str(current)
+
+    return _TEMPLATE_VAR.sub(_sub, text)
+
+
+def _retry_after_for_rule(rule: Rule, ctx: RequestContext) -> int | None:
+    """Largest ``next_free`` across the rule's quota conditions, or None.
+
+    You cannot retry until the most-constraining window has room, so we take the
+    max of the per-measure ``next_free`` values the service precomputed.
+    """
+    quota = ctx.metadata.get("quota", {})
+    waits = [
+        quota.get(cond.field, {}).get("next_free")
+        for cond in iter_conditions(rule.conditions)
+        if cond.type == ConditionType.QUOTA
+    ]
+    waits = [w for w in waits if isinstance(w, int)]
+    return max(waits) if waits else None
+
+
+def apply_action(rule: Rule, ctx: RequestContext) -> RuleOutcome:
     action = rule.action
 
     if action.type == ActionType.ALLOW:
@@ -269,11 +338,15 @@ def apply_action(rule: Rule) -> RuleOutcome:
         )
 
     if action.type == ActionType.BLOCK:
+        message = render_template(
+            action.target or "Request blocked by policy", ctx.metadata
+        )
         return RuleOutcome(
             action_type=ActionType.BLOCK,
             rule_name=rule.name,
-            block_status=403,
-            block_message=action.target or "Request blocked by policy",
+            block_status=action.status_code,
+            block_message=message,
+            retry_after_seconds=_retry_after_for_rule(rule, ctx),
         )
 
     if action.type == ActionType.REWRITE:

@@ -213,32 +213,14 @@ class RuleCreate(BaseModel):
     @field_validator("conditions")
     @classmethod
     def validate_conditions(cls, v: dict[str, Any]) -> dict[str, Any]:
-        from ttllm.schemas.rules import ConditionGroupSchema
-        ConditionGroupSchema(**v)
-        return v
+        from ttllm.schemas.rules import validate_condition_group_dict
+        return validate_condition_group_dict(v)
 
     @field_validator("action")
     @classmethod
     def validate_action(cls, v: dict[str, Any]) -> dict[str, Any]:
-        from ttllm.schemas.rules import _get_action_type
-        from ttllm.schemas.rules import (
-            RerouteActionSchema,
-            BlockActionSchema,
-            AllowActionSchema,
-            RewriteActionSchema,
-        )
-        action_type = _get_action_type(v)
-        schemas = {
-            "reroute": RerouteActionSchema,
-            "block": BlockActionSchema,
-            "allow": AllowActionSchema,
-            "rewrite": RewriteActionSchema,
-        }
-        schema_cls = schemas.get(action_type)
-        if not schema_cls:
-            raise ValueError(f"Unknown action type: {action_type}")
-        schema_cls(**v)
-        return v
+        from ttllm.schemas.rules import validate_action_dict
+        return validate_action_dict(v)
 
 
 class RuleUpdate(BaseModel):
@@ -254,34 +236,16 @@ class RuleUpdate(BaseModel):
     def validate_conditions(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
         if v is None:
             return None
-        from ttllm.schemas.rules import ConditionGroupSchema
-        ConditionGroupSchema(**v)
-        return v
+        from ttllm.schemas.rules import validate_condition_group_dict
+        return validate_condition_group_dict(v)
 
     @field_validator("action")
     @classmethod
     def validate_action(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
         if v is None:
             return None
-        from ttllm.schemas.rules import _get_action_type
-        from ttllm.schemas.rules import (
-            RerouteActionSchema,
-            BlockActionSchema,
-            AllowActionSchema,
-            RewriteActionSchema,
-        )
-        action_type = _get_action_type(v)
-        schemas = {
-            "reroute": RerouteActionSchema,
-            "block": BlockActionSchema,
-            "allow": AllowActionSchema,
-            "rewrite": RewriteActionSchema,
-        }
-        schema_cls = schemas.get(action_type)
-        if not schema_cls:
-            raise ValueError(f"Unknown action type: {action_type}")
-        schema_cls(**v)
-        return v
+        from ttllm.schemas.rules import validate_action_dict
+        return validate_action_dict(v)
 
 
 class RuleResponse(BaseModel):

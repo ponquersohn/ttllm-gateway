@@ -109,12 +109,21 @@ async def create_message(
             headers={k.lower(): v for k, v in request.headers.items()},
             user_id=str(ctx.user.id),
         )
+        # Precompute moving-window quota aggregates into rule_ctx.metadata so the
+        # pure core engine can evaluate quota conditions and render block messages.
+        await rules_service.populate_quota_metadata(db, active_rules, rule_ctx)
         outcome = rules_service.evaluate_rules(active_rules, rule_ctx)
         if outcome:
             if outcome.action_type == ActionType.BLOCK:
+                headers = (
+                    {"Retry-After": str(outcome.retry_after_seconds)}
+                    if outcome.retry_after_seconds
+                    else None
+                )
                 raise HTTPException(
                     status_code=outcome.block_status,
                     detail={"type": "policy_error", "message": outcome.block_message},
+                    headers=headers,
                 )
             elif outcome.action_type == ActionType.REROUTE:
                 body = body.model_copy(update={"model": outcome.rerouted_model})

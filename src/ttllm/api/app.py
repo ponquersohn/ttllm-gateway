@@ -141,6 +141,7 @@ def create_app() -> FastAPI:
                 "type": "error",
                 "error": {"type": error_type, "message": message},
             },
+            headers=exc.headers,
         )
 
     @app.exception_handler(Exception)

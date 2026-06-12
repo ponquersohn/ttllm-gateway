@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import Numeric, cast, func, select
@@ -21,6 +22,65 @@ def _total_cost_sum():
     SUM; empty strings would fail the cast, so they are mapped to NULL first.
     """
     return func.sum(cast(func.nullif(AuditLog.total_cost, ""), Numeric(38, 18)))
+
+
+_WINDOW_MEASURES = {
+    "cost": lambda: _total_cost_sum(),
+    "tokens": lambda: func.sum(AuditLog.input_tokens + AuditLog.output_tokens),
+    "requests": lambda: func.count(AuditLog.id),
+}
+
+
+async def get_window_aggregate(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    measure: str,
+    window_seconds: int,
+    per: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Aggregate a user's successful usage over a trailing moving window.
+
+    Used by the rules engine's quota conditions. ``measure`` is one of
+    ``cost`` / ``tokens`` / ``requests``. Returns ``{"value", "oldest_ts"}``
+    where ``oldest_ts`` is the earliest contributing row (used to compute when
+    the window frees up). Only ``status_code == 200`` rows count — blocked or
+    errored requests don't consume quota.
+
+    ``per`` optionally narrows the window by dimension; currently only
+    ``{"model": "<name>"}`` is supported (exact model-name scoping).
+    """
+    measure_fn = _WINDOW_MEASURES.get(measure)
+    if measure_fn is None:
+        raise ValueError(f"unknown quota measure: {measure}")
+
+    now = now or datetime.now(timezone.utc)
+    window_start = now - timedelta(seconds=window_seconds)
+
+    query = select(
+        measure_fn().label("value"),
+        func.min(AuditLog.created_at).label("oldest_ts"),
+    ).where(
+        AuditLog.user_id == user_id,
+        AuditLog.created_at >= window_start,
+        AuditLog.status_code == 200,
+    )
+
+    per = per or {}
+    model_name = per.get("model")
+    if model_name is not None:
+        query = query.join(LLMModel, AuditLog.model_id == LLMModel.id).where(
+            LLMModel.name == model_name
+        )
+
+    row = (await db.execute(query)).one()
+    value = row.value
+    if measure == "requests":
+        value = int(value or 0)
+    else:
+        value = Decimal(value) if value is not None else Decimal("0")
+    return {"value": value, "oldest_ts": row.oldest_ts}
 
 
 async def get_usage_summary(

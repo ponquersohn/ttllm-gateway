@@ -30,6 +30,7 @@ class EngineConfig(BaseModel):
     listen_port: int = 8000
     cors_origins: list[str] = ["*"]
     log_request_bodies: bool = False
+    rules_cache_ttl_seconds: int = 30
 
 
 class JWTConfig(BaseModel):
