@@ -30,6 +30,8 @@ _WINDOW_MEASURES = {
     "requests": lambda: func.count(AuditLog.id),
 }
 
+_BILLABLE_STATUS_CODES = (200, 499)
+
 
 async def get_window_aggregate(
     db: AsyncSession,
@@ -45,8 +47,8 @@ async def get_window_aggregate(
     Used by the rules engine's quota conditions. ``measure`` is one of
     ``cost`` / ``tokens`` / ``requests``. Returns ``{"value", "oldest_ts"}``
     where ``oldest_ts`` is the earliest contributing row (used to compute when
-    the window frees up). Only ``status_code == 200`` rows count — blocked or
-    errored requests don't consume quota.
+    the window frees up). Only billable rows count — completed requests and
+    client-disconnected streams that still reached final provider usage metadata.
 
     ``per`` optionally narrows the window by dimension; currently only
     ``{"model": "<name>"}`` is supported (exact model-name scoping).
@@ -64,7 +66,7 @@ async def get_window_aggregate(
     ).where(
         AuditLog.user_id == user_id,
         AuditLog.created_at >= window_start,
-        AuditLog.status_code == 200,
+        AuditLog.status_code.in_(_BILLABLE_STATUS_CODES),
     )
 
     per = per or {}
