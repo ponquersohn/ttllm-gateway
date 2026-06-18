@@ -38,24 +38,25 @@ def _fetch_report_data(client, user_id: str | None, since: str | None, until: st
 
     user_usage = []
     if not user_id:
-        users_resp = handle_response(client.get("/admin/users", params={"limit": 200}))
-        for u in users_resp.get("items", []):
-            u_params: dict = {"user_id": u["id"]}
-            if since:
-                u_params["since"] = since
-            if until:
-                u_params["until"] = until
-            u_summary = handle_response(client.get("/admin/usage", params=u_params))
-            if u_summary["total_requests"] > 0:
-                u_costs = handle_response(client.get("/admin/usage/costs", params=u_params))
-                user_usage.append({
-                    "user_name": u["name"],
-                    "user_email": u["email"],
-                    "request_count": u_summary["total_requests"],
-                    "input_tokens": u_summary["total_input_tokens"],
-                    "output_tokens": u_summary["total_output_tokens"],
-                    "total_cost": sum(float(c.get("total_cost", 0)) for c in u_costs),
-                })
+        by_user_params: dict = {}
+        if since:
+            by_user_params["since"] = since
+        if until:
+            by_user_params["until"] = until
+        rows = handle_response(client.get("/admin/usage/by-user", params=by_user_params))
+        # Already ordered by cost descending; surface a numeric cost for the report's formatting.
+        user_usage = [
+            {
+                "user_name": r.get("user_name") or "",
+                "user_email": r.get("user_email") or "",
+                "request_count": r["request_count"],
+                "input_tokens": r["input_tokens"],
+                "output_tokens": r["output_tokens"],
+                "total_cost": float(r.get("total_cost") or 0),
+            }
+            for r in rows
+            if r["request_count"] > 0
+        ]
 
     return {
         "summary": summary,

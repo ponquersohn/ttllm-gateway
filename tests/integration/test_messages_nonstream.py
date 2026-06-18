@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import time
+
 import httpx
 
 
@@ -77,3 +80,65 @@ def test_nonstreaming_audit_cost_and_metadata(
     )
     assert summary.status_code == 200, summary.text
     assert "total_cost" in summary.json()
+
+
+def test_usage_filter_by_email_and_by_user(
+    client: httpx.Client, admin_headers: dict, bedrock_model: dict
+):
+    """Usage endpoints can scope by user email, and by-user lists spenders highest-cost first."""
+    email = f"usage-email-probe-{os.getpid()}-{time.monotonic_ns()}@example.com"
+    u = client.post(
+        "/admin/users",
+        headers=admin_headers,
+        json={"name": "Usage Probe", "email": email, "password": "Integration1!"},
+    )
+    assert u.status_code == 201, u.text
+    user_id = u.json()["id"]
+
+    client.post(
+        f"/admin/users/{user_id}/permissions",
+        headers=admin_headers,
+        json={"permissions": ["llm.invoke"]},
+    )
+    client.post(
+        f"/admin/models/{bedrock_model['id']}/assign",
+        headers=admin_headers,
+        json={"user_ids": [user_id]},
+    )
+    t = client.post(
+        "/admin/tokens",
+        headers=admin_headers,
+        json={"user_id": user_id, "label": "usage-probe", "permissions": ["llm.invoke"]},
+    )
+    token = t.json()["access_token"]
+
+    resp = client.post(
+        "/anthropic/v1/messages",
+        headers={"x-api-key": token},
+        json={
+            "model": bedrock_model["name"],
+            "messages": [{"role": "user", "content": "email scoped"}],
+            "max_tokens": 128,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Filtering the summary by email matches filtering by the resolved user id.
+    by_email = client.get("/admin/usage", headers=admin_headers, params={"email": email})
+    assert by_email.status_code == 200, by_email.text
+    by_id = client.get("/admin/usage", headers=admin_headers, params={"user_id": user_id})
+    assert by_email.json()["total_requests"] == by_id.json()["total_requests"] >= 1
+
+    # Unknown email is a 404, not a silent unscoped query.
+    missing = client.get(
+        "/admin/usage", headers=admin_headers, params={"email": "nobody@example.com"}
+    )
+    assert missing.status_code == 404, missing.text
+
+    # by-user lists the probe user, ordered by cost descending.
+    by_user = client.get("/admin/usage/by-user", headers=admin_headers)
+    assert by_user.status_code == 200, by_user.text
+    rows = by_user.json()
+    assert any(r["user_email"] == email for r in rows)
+    costs = [float(r["total_cost"]) for r in rows]
+    assert costs == sorted(costs, reverse=True)

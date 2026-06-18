@@ -174,8 +174,13 @@ async def get_user_usage_summary(
     db: AsyncSession,
     since: datetime | None = None,
     until: datetime | None = None,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Get usage summary grouped by user."""
+    """Get usage summary grouped by user, ordered by total cost descending.
+
+    Highest-spending users come first, so passing ``limit`` yields the top N users by cost.
+    """
+    total_cost = _total_cost_sum()
     query = (
         select(
             User.id.label("user_id"),
@@ -184,16 +189,19 @@ async def get_user_usage_summary(
             func.count(AuditLog.id).label("request_count"),
             func.sum(AuditLog.input_tokens).label("input_tokens"),
             func.sum(AuditLog.output_tokens).label("output_tokens"),
-            _total_cost_sum().label("total_cost"),
+            total_cost.label("total_cost"),
         )
         .join(User, AuditLog.user_id == User.id)
         .group_by(User.id, User.name, User.email)
+        .order_by(func.coalesce(total_cost, 0).desc())
     )
 
     if since:
         query = query.where(AuditLog.created_at >= since)
     if until:
         query = query.where(AuditLog.created_at <= until)
+    if limit is not None:
+        query = query.limit(limit)
 
     result = await db.execute(query)
     return [
