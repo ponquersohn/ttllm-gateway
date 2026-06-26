@@ -367,7 +367,7 @@ async def update_model(
     await admin_audit_service.log(
         db, actor_id=ctx.user.id, actor_jti=ctx.jti,
         action="model.update", resource_type="model", resource_id=model_id,
-        details={"fields": list(body.model_dump(exclude_unset=True).keys())},
+        details={"fields": [k for k in body.model_dump(exclude_unset=True) if k != "merge_config"]},
     )
     return ModelResponse.model_validate(model)
 
