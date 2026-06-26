@@ -198,6 +198,16 @@ class CostBreakdownItem(BaseModel):
     total_cost: str
 
 
+class UserUsageItem(BaseModel):
+    user_id: str
+    user_name: str | None = None
+    user_email: str | None = None
+    request_count: int
+    input_tokens: int
+    output_tokens: int
+    total_cost: str
+
+
 
 
 # --- Rules ---

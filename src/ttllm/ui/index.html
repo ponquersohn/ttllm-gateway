@@ -700,16 +700,22 @@ tr:hover td{background:rgba(0,0,0,.015)}
   const usageSummaryEl = $("#usage-summary");
   const costsWrapper = $("#costs-table-wrapper");
   let usageLoaded = false;
+  let usagePresetRange = null;
 
   async function loadUsage() {
     const sinceVal = $("#usage-since").value;
     const untilVal = $("#usage-until").value;
     const params = new URLSearchParams();
-    if (sinceVal) params.set("since", new Date(sinceVal).toISOString());
-    if (untilVal) {
-      const d = new Date(untilVal);
-      d.setHours(23, 59, 59, 999);
-      params.set("until", d.toISOString());
+    if (usagePresetRange) {
+      if (usagePresetRange.since) params.set("since", usagePresetRange.since);
+      if (usagePresetRange.until) params.set("until", usagePresetRange.until);
+    } else {
+      if (sinceVal) params.set("since", new Date(sinceVal).toISOString());
+      if (untilVal) {
+        const d = new Date(untilVal);
+        d.setHours(23, 59, 59, 999);
+        params.set("until", d.toISOString());
+      }
     }
     const qs = params.toString();
     const suffix = qs ? "?" + qs : "";
@@ -724,6 +730,7 @@ tr:hover td{background:rgba(0,0,0,.015)}
       const s = await resp.json();
       usageSummaryEl.innerHTML =
         '<div class="stat-card"><div class="stat-value">' + s.total_requests.toLocaleString() + '</div><div class="stat-label">Requests</div></div>' +
+        '<div class="stat-card"><div class="stat-value">$' + escapeHtml(s.total_cost || "0") + '</div><div class="stat-label">Total Cost</div></div>' +
         '<div class="stat-card"><div class="stat-value">' + s.total_input_tokens.toLocaleString() + '</div><div class="stat-label">Input Tokens</div></div>' +
         '<div class="stat-card"><div class="stat-value">' + s.total_output_tokens.toLocaleString() + '</div><div class="stat-label">Output Tokens</div></div>' +
         '<div class="stat-card"><div class="stat-value">' + s.avg_latency_ms.toLocaleString(undefined, {maximumFractionDigits: 1}) + ' ms</div><div class="stat-label">Avg Latency</div></div>';
@@ -753,8 +760,16 @@ tr:hover td{background:rgba(0,0,0,.015)}
     }
   }
 
-  $("#usage-since").addEventListener("change", function() { loadUsage(); });
-  $("#usage-until").addEventListener("change", function() { loadUsage(); });
+  $("#usage-since").addEventListener("change", function() {
+    usagePresetRange = null;
+    document.querySelectorAll(".preset-btn").forEach(function(b) { b.classList.remove("active"); });
+    loadUsage();
+  });
+  $("#usage-until").addEventListener("change", function() {
+    usagePresetRange = null;
+    document.querySelectorAll(".preset-btn").forEach(function(b) { b.classList.remove("active"); });
+    loadUsage();
+  });
 
   document.querySelectorAll(".preset-btn").forEach(function(btn) {
     btn.addEventListener("click", function() {
@@ -764,13 +779,14 @@ tr:hover td{background:rgba(0,0,0,.015)}
       if (preset === "all") {
         $("#usage-since").value = "";
         $("#usage-until").value = "";
+        usagePresetRange = null;
       } else {
         const days = parseInt(preset, 10);
         const now = new Date();
-        const since = new Date(now);
-        since.setDate(since.getDate() - days);
+        const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
         $("#usage-since").value = since.toISOString().slice(0, 10);
         $("#usage-until").value = now.toISOString().slice(0, 10);
+        usagePresetRange = { since: since.toISOString(), until: now.toISOString() };
       }
       loadUsage();
     });

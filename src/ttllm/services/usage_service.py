@@ -30,6 +30,8 @@ _WINDOW_MEASURES = {
     "requests": lambda: func.count(AuditLog.id),
 }
 
+_BILLABLE_STATUS_CODES = (200, 499)
+
 
 async def get_window_aggregate(
     db: AsyncSession,
@@ -45,8 +47,8 @@ async def get_window_aggregate(
     Used by the rules engine's quota conditions. ``measure`` is one of
     ``cost`` / ``tokens`` / ``requests``. Returns ``{"value", "oldest_ts"}``
     where ``oldest_ts`` is the earliest contributing row (used to compute when
-    the window frees up). Only ``status_code == 200`` rows count — blocked or
-    errored requests don't consume quota.
+    the window frees up). Only billable rows count — completed requests and
+    client-disconnected streams that still reached final provider usage metadata.
 
     ``per`` optionally narrows the window by dimension; currently only
     ``{"model": "<name>"}`` is supported (exact model-name scoping).
@@ -64,7 +66,7 @@ async def get_window_aggregate(
     ).where(
         AuditLog.user_id == user_id,
         AuditLog.created_at >= window_start,
-        AuditLog.status_code == 200,
+        AuditLog.status_code.in_(_BILLABLE_STATUS_CODES),
     )
 
     per = per or {}
@@ -172,8 +174,13 @@ async def get_user_usage_summary(
     db: AsyncSession,
     since: datetime | None = None,
     until: datetime | None = None,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Get usage summary grouped by user."""
+    """Get usage summary grouped by user, ordered by total cost descending.
+
+    Highest-spending users come first, so passing ``limit`` yields the top N users by cost.
+    """
+    total_cost = _total_cost_sum()
     query = (
         select(
             User.id.label("user_id"),
@@ -182,16 +189,19 @@ async def get_user_usage_summary(
             func.count(AuditLog.id).label("request_count"),
             func.sum(AuditLog.input_tokens).label("input_tokens"),
             func.sum(AuditLog.output_tokens).label("output_tokens"),
-            _total_cost_sum().label("total_cost"),
+            total_cost.label("total_cost"),
         )
         .join(User, AuditLog.user_id == User.id)
         .group_by(User.id, User.name, User.email)
+        .order_by(func.coalesce(total_cost, 0).desc())
     )
 
     if since:
         query = query.where(AuditLog.created_at >= since)
     if until:
         query = query.where(AuditLog.created_at <= until)
+    if limit is not None:
+        query = query.limit(limit)
 
     result = await db.execute(query)
     return [

@@ -707,6 +707,19 @@ class TestWindowAggregate:
         assert "llm_models" in compiled
         assert "status_code" in compiled
 
+    @pytest.mark.asyncio
+    async def test_billable_disconnect_status_counts_toward_window(self):
+        from ttllm.services import usage_service
+
+        db = _aggregate_db(3, None)
+        await usage_service.get_window_aggregate(
+            db, uuid.uuid4(), measure="requests", window_seconds=60,
+        )
+
+        query = db.execute.await_args.args[0]
+        compiled = str(query.compile(compile_kwargs={"literal_binds": True}))
+        assert "audit_logs.status_code IN (200, 499)" in compiled
+
 
 class TestNextFree:
     def test_none_oldest_is_zero(self):

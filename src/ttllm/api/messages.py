@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Annotated
@@ -157,7 +158,18 @@ async def create_message(
         return await _handle_invoke(body, resolved_model, ctx.user, db, request_id, metadata)
 
 
-async def _finalize(state, body, llm_model, user, db, request_id, metadata):
+async def _finalize(
+    state,
+    body,
+    llm_model,
+    user,
+    db,
+    request_id,
+    metadata,
+    *,
+    status_code: int = 200,
+    error_message: str | None = None,
+):
     """Write the audit row from a completed provider state.
 
     Shared by both the streaming and non-streaming paths — the only difference is when the
@@ -174,7 +186,8 @@ async def _finalize(state, body, llm_model, user, db, request_id, metadata):
         output_tokens=state.output_tokens,
         total_cost=str(state.get_cost()),
         latency_ms=provider_metadata.get("latency_ms", 0),
-        status_code=200,
+        status_code=status_code,
+        error_message=error_message,
         metadata_json=metadata,
         provider_metadata=provider_metadata,
         request_body=body.model_dump() if settings.engine.log_request_bodies else None,
@@ -220,13 +233,68 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
 async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
     try:
         state, sse_stream = gateway.stream(body, llm_model, request_id)
+        client_disconnected = asyncio.Event()
+        queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=16)
 
-        async def event_generator():
+        async def queue_event(event: str) -> None:
+            if client_disconnected.is_set():
+                return
+
+            put_task = asyncio.create_task(queue.put(event))
+            disconnect_task = asyncio.create_task(client_disconnected.wait())
+            done, pending = await asyncio.wait(
+                {put_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+            if disconnect_task in done and not put_task.done():
+                put_task.cancel()
+                return
+
+            await put_task
+
+        async def producer() -> None:
             try:
                 async for event in sse_stream:
-                    yield event
+                    await queue_event(event)
+                await _finalize(
+                    state,
+                    body,
+                    llm_model,
+                    user,
+                    db,
+                    request_id,
+                    metadata,
+                    status_code=499 if client_disconnected.is_set() else 200,
+                    error_message=(
+                        "Client disconnected during streaming response"
+                        if client_disconnected.is_set()
+                        else None
+                    ),
+                )
             finally:
-                await _finalize(state, body, llm_model, user, db, request_id, metadata)
+                if not client_disconnected.is_set():
+                    await queue.put(None)
+
+        async def event_generator():
+            producer_task = asyncio.create_task(producer())
+            try:
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        break
+                    yield event
+                await producer_task
+            except asyncio.CancelledError:
+                client_disconnected.set()
+                await asyncio.shield(producer_task)
+                raise
+            finally:
+                if not producer_task.done():
+                    producer_task.cancel()
+                    await asyncio.gather(producer_task, return_exceptions=True)
 
         return StreamingResponse(
             event_generator(),

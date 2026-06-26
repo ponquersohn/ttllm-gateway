@@ -31,6 +31,7 @@ from ttllm.schemas.admin import (
     ServerStatusResponse,
     StatusCheck,
     UsageSummaryResponse,
+    UserUsageItem,
     UserCreate,
     UserResponse,
     UserUpdate,
@@ -714,15 +715,33 @@ async def revoke_token(
 # --- Usage ---
 
 
+async def _resolve_usage_user_id(
+    db: DB, user_id: uuid.UUID | None, email: str | None
+) -> uuid.UUID | None:
+    """Resolve a usage filter to a user id, looking up by email when given.
+
+    ``user_id`` and ``email`` are alternative ways to scope to one user. A non-existent
+    email raises 404 rather than silently returning everyone's usage.
+    """
+    if email is None:
+        return user_id
+    user = await user_service.get_user_by_email(db, email)
+    if user is None:
+        raise HTTPException(404, detail={"type": "not_found", "message": f"User '{email}' not found"})
+    return user.id
+
+
 @router.get("/usage", response_model=UsageSummaryResponse)
 async def get_usage(
     db: DB,
     ctx: AuthContext = Depends(require_permission(Permissions.USAGE_VIEW)),
     user_id: uuid.UUID | None = None,
+    email: str | None = None,
     model_id: uuid.UUID | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
 ):
+    user_id = await _resolve_usage_user_id(db, user_id, email)
     summary = await usage_service.get_usage_summary(
         db, user_id=user_id, model_id=model_id, since=since, until=until
     )
@@ -734,12 +753,28 @@ async def get_costs(
     db: DB,
     ctx: AuthContext = Depends(require_permission(Permissions.USAGE_VIEW)),
     user_id: uuid.UUID | None = None,
+    email: str | None = None,
     model_id: uuid.UUID | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
 ):
+    user_id = await _resolve_usage_user_id(db, user_id, email)
     return await usage_service.get_cost_breakdown(
         db, user_id=user_id, model_id=model_id, since=since, until=until
+    )
+
+
+@router.get("/usage/by-user", response_model=list[UserUsageItem])
+async def get_usage_by_user(
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.USAGE_VIEW)),
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int | None = Query(None, ge=1, le=1000, description="Return only the top N users by cost"),
+):
+    """Usage grouped by user, highest cost first (pass ``limit`` for top-N users)."""
+    return await usage_service.get_user_usage_summary(
+        db, since=since, until=until, limit=limit
     )
 
 

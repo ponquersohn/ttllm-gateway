@@ -38,7 +38,8 @@ ttllm groups list|show|create|update|delete
 ttllm tokens list|show|create|delete
 ttllm rules list|show|create|update|delete
 ttllm secrets list|show|create|update|delete
-ttllm usage summary|costs [--user] [--model] [--since] [--until]
+ttllm usage summary|costs [--user] [--email] [--model] [--since] [--until]
+ttllm usage by-user [--limit] [--since] [--until]
 ttllm audit-logs [--user] [--model] [--limit]
 ```
 
