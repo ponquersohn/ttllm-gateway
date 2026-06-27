@@ -16,6 +16,7 @@ class SelfTokenCreate(BaseModel):
 class AvailableModelResponse(BaseModel):
     id: uuid.UUID
     name: str
+    display_name: str | None = None
     provider: str
     match_pattern: str | None = None
 
