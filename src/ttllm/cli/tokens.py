@@ -8,14 +8,15 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
 )
 
-app = typer.Typer(help="Manage tokens")
+app = TtllmTyper(help="Manage tokens")
 
 
 @app.command("create")
@@ -37,6 +38,9 @@ def tokens_create(
         body["permissions"] = [s.strip() for s in permissions.split(",") if s.strip()]
     with get_client() as client:
         data = handle_response(client.post("/admin/tokens", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print("[green]Token created:[/green]")
     console.print(f"  Token: [bold]{data['access_token']}[/bold]")
     console.print(f"  ID: {data['id']}")
@@ -49,13 +53,12 @@ def tokens_create(
 @app.command("show")
 def tokens_show(
     token_id: str = typer.Argument(help="Token ID"),
-    as_json: bool = JSON_OPTION,
 ):
     """Show token details (token value is never displayed)."""
     with get_client() as client:
         data = handle_response(client.get(f"/admin/tokens/{token_id}"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -72,7 +75,6 @@ def tokens_show(
 @app.command("list")
 def tokens_list(
     user_id: Optional[str] = typer.Option(None, "--user", help="Filter by user ID"),
-    as_json: bool = JSON_OPTION,
 ):
     """List active tokens."""
     params = {}
@@ -81,7 +83,7 @@ def tokens_list(
     with get_client() as client:
         data = handle_response(client.get("/admin/tokens", params=params))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -117,6 +119,9 @@ def tokens_delete(
     with get_client() as client:
         resp = client.delete(f"/admin/tokens/{token_id}")
         if resp.status_code == 204:
-            console.print("[green]Token revoked.[/green]")
+            if json_mode():
+                print_json({"status": "revoked", "id": token_id})
+            else:
+                console.print("[green]Token revoked.[/green]")
         else:
             handle_response(resp)

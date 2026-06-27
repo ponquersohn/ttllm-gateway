@@ -10,14 +10,15 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
 )
 
-app = typer.Typer(help="View usage and costs")
+app = TtllmTyper(help="View usage and costs")
 
 
 _RELATIVE_TIME_RE = re.compile(r"^-(\d+)([mhdw])$")
@@ -48,12 +49,11 @@ def usage_callback(
     model_id: Optional[str] = typer.Option(None, "--model", help="Filter by model ID"),
     since: Optional[str] = typer.Option(None, help="Start date (ISO or relative like -24h)"),
     until: Optional[str] = typer.Option(None, help="End date (ISO or relative like -1h)"),
-    as_json: bool = JSON_OPTION,
 ):
     """View usage summary."""
     if ctx.invoked_subcommand is not None:
         return
-    _print_usage_summary(user_id, email, model_id, since, until, as_json)
+    _print_usage_summary(user_id, email, model_id, since, until)
 
 
 @app.command("summary")
@@ -63,10 +63,9 @@ def usage_summary(
     model_id: Optional[str] = typer.Option(None, "--model", help="Filter by model ID"),
     since: Optional[str] = typer.Option(None, help="Start date (ISO or relative like -24h)"),
     until: Optional[str] = typer.Option(None, help="End date (ISO or relative like -1h)"),
-    as_json: bool = JSON_OPTION,
 ):
     """View usage summary."""
-    _print_usage_summary(user_id, email, model_id, since, until, as_json)
+    _print_usage_summary(user_id, email, model_id, since, until)
 
 
 def _print_usage_summary(
@@ -75,7 +74,6 @@ def _print_usage_summary(
     model_id: Optional[str],
     since: Optional[str],
     until: Optional[str],
-    as_json: bool,
 ) -> None:
     params = {}
     if user_id:
@@ -92,7 +90,7 @@ def _print_usage_summary(
     with get_client() as client:
         data = handle_response(client.get("/admin/usage", params=params))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -111,7 +109,6 @@ def usage_costs(
     model_id: Optional[str] = typer.Option(None, "--model", help="Filter by model ID"),
     since: Optional[str] = typer.Option(None, help="Start date (ISO or relative like -24h)"),
     until: Optional[str] = typer.Option(None, help="End date (ISO or relative like -1h)"),
-    as_json: bool = JSON_OPTION,
 ):
     """View cost breakdown by model."""
     params = {}
@@ -129,7 +126,7 @@ def usage_costs(
     with get_client() as client:
         data = handle_response(client.get("/admin/usage/costs", params=params))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -156,7 +153,6 @@ def usage_by_user(
     since: Optional[str] = typer.Option(None, help="Start date (ISO or relative like -24h)"),
     until: Optional[str] = typer.Option(None, help="End date (ISO or relative like -1h)"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Show only the top N users by cost"),
-    as_json: bool = JSON_OPTION,
 ):
     """View usage and cost grouped by user, highest cost first."""
     params = {}
@@ -170,7 +166,7 @@ def usage_by_user(
     with get_client() as client:
         data = handle_response(client.get("/admin/usage/by-user", params=params))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 

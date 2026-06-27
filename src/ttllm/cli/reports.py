@@ -9,9 +9,9 @@ from typing import Optional
 
 import typer
 
-from ttllm.cli._common import console, get_client, handle_response
+from ttllm.cli._common import TtllmTyper, console, get_client, handle_response
 
-app = typer.Typer(help="Generate usage reports (preview)")
+app = TtllmTyper(help="Generate usage reports (preview)")
 
 
 def _fetch_report_data(client, user_id: str | None, since: str | None, until: str | None) -> dict:

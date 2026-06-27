@@ -9,22 +9,22 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
     resolve_rule,
 )
 
-app = typer.Typer(help="Manage rules")
+app = TtllmTyper(help="Manage rules")
 
 
 @app.command("list")
 def rules_list(
     offset: int = typer.Option(0),
     limit: int = typer.Option(50),
-    as_json: bool = JSON_OPTION,
 ):
     """List all rules."""
     with get_client() as client:
@@ -32,7 +32,7 @@ def rules_list(
             client.get("/admin/rules", params={"offset": offset, "limit": limit})
         )
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -60,14 +60,13 @@ def rules_list(
 def rules_show(
     rule: str = typer.Argument(help="Rule name (or ID with --use-ids)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
-    as_json: bool = JSON_OPTION,
 ):
     """Show rule details."""
     with get_client() as client:
         rule_id = rule if use_ids else resolve_rule(client, rule)
         data = handle_response(client.get(f"/admin/rules/{rule_id}"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -102,6 +101,9 @@ def rules_create(
         body["description"] = description
     with get_client() as client:
         data = handle_response(client.post("/admin/rules", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Rule created:[/green] {data['id']}")
     console.print(f"  Name: {data['name']}")
     console.print(f"  Weight: {data['weight']}")
@@ -138,6 +140,9 @@ def rules_update(
     with get_client() as client:
         rule_id = rule if use_ids else resolve_rule(client, rule)
         data = handle_response(client.patch(f"/admin/rules/{rule_id}", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Rule updated:[/green] {data['name']}")
 
 
@@ -151,6 +156,9 @@ def rules_delete(
         rule_id = rule if use_ids else resolve_rule(client, rule)
         resp = client.delete(f"/admin/rules/{rule_id}")
         if resp.status_code == 204:
-            console.print("[green]Rule deleted.[/green]")
+            if json_mode():
+                print_json({"status": "deleted", "id": rule_id})
+            else:
+                console.print("[green]Rule deleted.[/green]")
         else:
             handle_response(resp)

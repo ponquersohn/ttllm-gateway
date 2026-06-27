@@ -8,14 +8,15 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
 )
 
-app = typer.Typer(help="View audit logs")
+app = TtllmTyper(help="View audit logs")
 
 
 @app.callback(invoke_without_command=True)
@@ -23,7 +24,6 @@ def audit_logs_list(
     user_id: Optional[str] = typer.Option(None, "--user", help="Filter by user ID"),
     model_id: Optional[str] = typer.Option(None, "--model", help="Filter by model ID"),
     limit: int = typer.Option(20, help="Number of entries"),
-    as_json: bool = JSON_OPTION,
 ):
     """View recent audit logs."""
     params = {"limit": limit}
@@ -35,7 +35,7 @@ def audit_logs_list(
     with get_client() as client:
         data = handle_response(client.get("/admin/audit-logs", params=params))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 

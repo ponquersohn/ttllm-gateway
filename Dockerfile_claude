@@ -1,0 +1,47 @@
+# Clean Claude Code sandbox for testing against the TTLLM gateway.
+#
+# Builds a throwaway image with a pinned Claude Code and nothing else. The
+# gateway connection (base URL, api key, model) is supplied at run time via
+# work/.env, so the image itself stays free of any credentials.
+#
+#   docker build -t ttllm-claude -f Dockerfile_claude .
+#   ./work/run.sh                 # interactive bash in /work with claude on PATH
+FROM node:22-slim
+
+# git is handy inside the sandbox (Claude Code uses it); ca-certificates so the
+# gateway's TLS endpoint validates.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Trust the host's corporate CA certificates. These are copied from the host
+# into the (git-ignored) work/cacerts/ directory and folded into the system
+# trust store so TLS interception by the corporate proxy validates. They must
+# be in place before curl reaches out for the installer below.
+COPY work/cacerts/ /usr/local/share/ca-certificates/host/
+RUN update-ca-certificates
+
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Cheap, frequently-tweaked config goes last so editing it doesn't invalidate
+# the expensive apt/curl layers above.
+
+# Node (and therefore Claude Code) reads its own CA bundle, not the system one,
+# so point it at the refreshed system store.
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+
+# The installer drops the binary in ~/.local/bin; put it on PATH so `claude`
+# resolves. ENV covers normal shells; the profile.d snippet covers login
+# shells (bash -l), which re-source /etc/profile and would otherwise reset PATH.
+ENV PATH="/root/.local/bin:${PATH}"
+RUN echo 'export PATH="$HOME/.local/bin:$PATH"' > /etc/profile.d/claude-path.sh
+
+# Keep the container hermetic: no autoupdate, no telemetry.
+ENV CLAUDE_CODE_ENABLE_TELEMETRY=0 \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1
+
+WORKDIR /work
+
+CMD ["bash"]

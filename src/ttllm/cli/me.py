@@ -8,29 +8,28 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
 )
 
-app = typer.Typer(help="Self-service: view your models, tokens, and usage")
-tokens_app = typer.Typer(help="Manage your own tokens")
+app = TtllmTyper(help="Self-service: view your models, tokens, and usage")
+tokens_app = TtllmTyper(help="Manage your own tokens")
 app.add_typer(tokens_app, name="tokens")
-usage_app = typer.Typer(help="View your own usage and costs")
+usage_app = TtllmTyper(help="View your own usage and costs")
 app.add_typer(usage_app, name="usage")
 
 
 @app.command("models")
-def me_models(
-    as_json: bool = JSON_OPTION,
-):
+def me_models():
     """List models available to you (direct + group assignments)."""
     with get_client() as client:
         data = handle_response(client.get("/me/models"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -49,14 +48,12 @@ def me_models(
 
 @tokens_app.command("list")
 @tokens_app.callback(invoke_without_command=True)
-def me_tokens_list(
-    as_json: bool = JSON_OPTION,
-):
+def me_tokens_list():
     """List your active tokens."""
     with get_client() as client:
         data = handle_response(client.get("/me/tokens"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -98,6 +95,9 @@ def me_tokens_create(
         body["permissions"] = [s.strip() for s in permissions.split(",") if s.strip()]
     with get_client() as client:
         data = handle_response(client.post("/me/tokens", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print("[green]Token created:[/green]")
     console.print(f"  Token: [bold]{data['access_token']}[/bold]")
     console.print(f"  ID: {data['id']}")
@@ -115,7 +115,10 @@ def me_tokens_delete(
     with get_client() as client:
         resp = client.delete(f"/me/tokens/{token_id}")
         if resp.status_code == 204:
-            console.print("[green]Token revoked.[/green]")
+            if json_mode():
+                print_json({"status": "revoked", "id": token_id})
+            else:
+                console.print("[green]Token revoked.[/green]")
         else:
             handle_response(resp)
 
@@ -128,7 +131,6 @@ def me_tokens_delete(
 def me_usage_summary(
     since: Optional[str] = typer.Option(None, help="Start date (ISO)"),
     until: Optional[str] = typer.Option(None, help="End date (ISO)"),
-    as_json: bool = JSON_OPTION,
 ):
     """View your usage summary."""
     params = {}
@@ -140,7 +142,7 @@ def me_usage_summary(
     with get_client() as client:
         data = handle_response(client.get("/me/usage", params=params))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -156,7 +158,6 @@ def me_usage_summary(
 def me_usage_costs(
     since: Optional[str] = typer.Option(None, help="Start date (ISO)"),
     until: Optional[str] = typer.Option(None, help="End date (ISO)"),
-    as_json: bool = JSON_OPTION,
 ):
     """View your cost breakdown by model."""
     params = {}
@@ -168,7 +169,7 @@ def me_usage_costs(
     with get_client() as client:
         data = handle_response(client.get("/me/usage/costs", params=params))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
