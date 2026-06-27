@@ -168,9 +168,11 @@ def create_app() -> FastAPI:
     from ttllm.api.auth import router as auth_router
     from ttllm.api.me import router as me_router
     from ttllm.api.messages import router as messages_router
+    from ttllm.api.models import router as models_router
 
     app.include_router(auth_router)
     app.include_router(messages_router)
+    app.include_router(models_router)
     app.include_router(me_router)
     app.include_router(admin_router)
 

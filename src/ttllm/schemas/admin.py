@@ -83,6 +83,7 @@ def _validate_match_pattern(v: str | None) -> str | None:
 
 class ModelCreate(BaseModel):
     name: str
+    display_name: str | None = None
     provider: str
     provider_model_id: str
     config_json: dict[str, Any] = {}
@@ -100,6 +101,7 @@ class ModelCreate(BaseModel):
 
 class ModelUpdate(BaseModel):
     name: str | None = None
+    display_name: str | None = None
     provider: str | None = None
     provider_model_id: str | None = None
     config_json: dict[str, Any] | None = None
@@ -120,6 +122,7 @@ class ModelUpdate(BaseModel):
 class ModelResponse(BaseModel):
     id: uuid.UUID
     name: str
+    display_name: str | None = None
     provider: str
     provider_model_id: str
     config_json: dict[str, Any]

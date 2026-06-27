@@ -283,3 +283,20 @@ class StreamEventMessageStop(BaseModel):
 
 class StreamEventPing(BaseModel):
     type: Literal["ping"] = "ping"
+
+
+# --- Models API ---
+
+
+class AnthropicModelObject(BaseModel):
+    type: Literal["model"] = "model"
+    id: str
+    display_name: str
+    created_at: str
+
+
+class AnthropicModelListResponse(BaseModel):
+    data: list[AnthropicModelObject]
+    has_more: bool
+    first_id: str | None = None
+    last_id: str | None = None
