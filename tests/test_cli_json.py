@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 
 from typer.testing import CliRunner
 
 from ttllm.cli import _common, users
 
 runner = CliRunner()
+
+# Rich may colorize help output with ANSI escapes (e.g. in CI where color is
+# forced), which splits "--json" across escape sequences. Strip them so the
+# substring assertion does not depend on terminal color detection.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 # --- The TtllmTyper mechanism itself ---
@@ -32,7 +42,7 @@ def test_ttllmtyper_injects_json_flag_and_sets_mode():
         pass
 
     # --json shows up in help even though `ping` declares no parameter
-    help_out = runner.invoke(app, ["ping", "--help"]).output
+    help_out = _strip_ansi(runner.invoke(app, ["ping", "--help"]).output)
     assert "--json" in help_out
 
     plain = runner.invoke(app, ["ping"])
