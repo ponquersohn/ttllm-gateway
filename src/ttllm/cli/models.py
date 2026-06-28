@@ -9,24 +9,24 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
     resolve_group,
     resolve_model,
     resolve_user,
 )
 
-app = typer.Typer(help="Manage models")
+app = TtllmTyper(help="Manage models")
 
 
 @app.command("list")
 def models_list(
     offset: int = typer.Option(0),
     limit: int = typer.Option(50),
-    as_json: bool = JSON_OPTION,
 ):
     """List all models."""
     with get_client() as client:
@@ -34,7 +34,7 @@ def models_list(
             client.get("/admin/models", params={"offset": offset, "limit": limit})
         )
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -70,14 +70,13 @@ def models_list(
 def models_show(
     model: str = typer.Argument(help="Model name (or ID with --use-ids)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
-    as_json: bool = JSON_OPTION,
 ):
     """Show model details."""
     with get_client() as client:
         model_id = model if use_ids else resolve_model(client, model)
         data = handle_response(client.get(f"/admin/models/{model_id}"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -125,6 +124,9 @@ def models_create(
         body["match_pattern"] = match_pattern
     with get_client() as client:
         data = handle_response(client.post("/admin/models", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Model created:[/green] {data['id']}")
     console.print(f"  Name: {data['name']}")
     console.print(f"  Provider: {data['provider']}")
@@ -176,6 +178,9 @@ def models_update(
     with get_client() as client:
         model_id = model if use_ids else resolve_model(client, model)
         data = handle_response(client.patch(f"/admin/models/{model_id}", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Model updated:[/green] {data['name']}")
 
 
@@ -189,7 +194,10 @@ def models_delete(
         model_id = model if use_ids else resolve_model(client, model)
         resp = client.delete(f"/admin/models/{model_id}")
         if resp.status_code == 204:
-            console.print("[green]Model deactivated.[/green]")
+            if json_mode():
+                print_json({"status": "deactivated", "id": model_id})
+            else:
+                console.print("[green]Model deactivated.[/green]")
         else:
             handle_response(resp)
 
@@ -205,6 +213,7 @@ def models_assign(
     if not user and not group:
         console.print("[red]Provide --user or --group.[/red]")
         raise typer.Exit(1)
+    result: dict = {}
     with get_client() as client:
         model_id = model if use_ids else resolve_model(client, model)
         if user:
@@ -215,8 +224,10 @@ def models_assign(
                     json={"user_ids": user_ids},
                 )
             )
-            for a in data.get("assignments", []):
-                console.print(f"  User {a['user_id'][:8]}...: {a['status']}")
+            result["users"] = data.get("assignments", [])
+            if not json_mode():
+                for a in data.get("assignments", []):
+                    console.print(f"  User {a['user_id'][:8]}...: {a['status']}")
         if group:
             group_ids = group if use_ids else [resolve_group(client, g) for g in group]
             data = handle_response(
@@ -225,8 +236,12 @@ def models_assign(
                     json={"group_ids": group_ids},
                 )
             )
-            for a in data.get("assignments", []):
-                console.print(f"  Group {a['group_id'][:8]}...: {a['status']}")
+            result["groups"] = data.get("assignments", [])
+            if not json_mode():
+                for a in data.get("assignments", []):
+                    console.print(f"  Group {a['group_id'][:8]}...: {a['status']}")
+    if json_mode():
+        print_json(result)
 
 
 @app.command("unassign")
@@ -240,19 +255,26 @@ def models_unassign(
     if not user and not group:
         console.print("[red]Provide --user or --group.[/red]")
         raise typer.Exit(1)
+    result: dict = {}
     with get_client() as client:
         model_id = model if use_ids else resolve_model(client, model)
         if user:
             user_id = user if use_ids else resolve_user(client, user)
             resp = client.delete(f"/admin/models/{model_id}/assign/{user_id}")
             if resp.status_code == 204:
-                console.print("[green]User assignment removed.[/green]")
+                result["user"] = {"status": "removed", "id": user_id}
+                if not json_mode():
+                    console.print("[green]User assignment removed.[/green]")
             else:
                 handle_response(resp)
         if group:
             group_id = group if use_ids else resolve_group(client, group)
             resp = client.delete(f"/admin/models/{model_id}/assign-group/{group_id}")
             if resp.status_code == 204:
-                console.print("[green]Group assignment removed.[/green]")
+                result["group"] = {"status": "removed", "id": group_id}
+                if not json_mode():
+                    console.print("[green]Group assignment removed.[/green]")
             else:
                 handle_response(resp)
+    if json_mode():
+        print_json(result)

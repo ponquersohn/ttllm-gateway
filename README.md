@@ -491,6 +491,8 @@ ttllm reports generate [--user] [--since] [--until] [--format pdf|html] [-o file
 ttllm audit-logs [--user] [--model] [--limit]
 ```
 
+Every command accepts `--json` for machine-readable output instead of formatted tables/text — including mutations (`create`/`update`/`delete`/`assign`/...). Commands that create or update a resource emit the resource object; delete/revoke commands (which return HTTP 204) emit a small status object such as `{"status": "deactivated", "id": "..."}`.
+
 `ttllm usage --since/--until` accepts ISO datetimes and relative UTC offsets such as `-24h`, `-7d`, `-30m`, or `-1w`.
 
 `ttllm usage summary` and `costs` can scope to a single user by `--user <id>` or `--email <email>` (the email is resolved server-side; an unknown email returns 404). `ttllm usage by-user` lists usage and cost grouped per user, ordered by total cost descending; pass `--limit N` for the top N spenders.

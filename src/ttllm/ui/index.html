@@ -572,22 +572,23 @@ tr:hover td{background:rgba(0,0,0,.015)}
       "Claude Code": {
         text: '# Environment variables\n' +
           'ANTHROPIC_BASE_URL=' + apiUrl + '\n' +
-          'ANTHROPIC_API_KEY=' + token + '\n\n' +
+          'ANTHROPIC_API_KEY=' + token + '\n' +
+          '# List gateway models in the /model picker\n' +
+          'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n\n' +
           '# Or launch directly\n' +
           'ANTHROPIC_BASE_URL=' + apiUrl + ' \\\n' +
           'ANTHROPIC_API_KEY=' + token + ' \\\n' +
+          'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \\\n' +
           '  claude\n\n' +
           '# Or add to Claude Code settings (.claude/settings.json):\n' +
           '# {\n' +
           '#   "env": {\n' +
           '#     "ANTHROPIC_BASE_URL": "' + apiUrl + '",\n' +
           '#     "ANTHROPIC_API_KEY": "' + token + '",\n' +
-          '#     "ANTHROPIC_DEFAULT_OPUS_MODEL": "MODEL_NAME",\n' +
-          '#     "ANTHROPIC_DEFAULT_SONNET_MODEL": "MODEL_NAME",\n' +
-          '#     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MODEL_NAME"\n' +
+          '#     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"\n' +
           '#   }\n' +
           '# }',
-        copyText: 'ANTHROPIC_BASE_URL=' + apiUrl + '\nANTHROPIC_API_KEY=' + token
+        copyText: 'ANTHROPIC_BASE_URL=' + apiUrl + '\nANTHROPIC_API_KEY=' + token + '\nCLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1'
       },
       "Cursor": {
         text: '# In Cursor Settings > Models > Override OpenAI Base URL:\n' +

@@ -8,22 +8,22 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
     resolve_group,
 )
 
-app = typer.Typer(help="Manage groups")
+app = TtllmTyper(help="Manage groups")
 
 
 @app.command("list")
 def groups_list(
     offset: int = typer.Option(0),
     limit: int = typer.Option(50),
-    as_json: bool = JSON_OPTION,
 ):
     """List all groups."""
     with get_client() as client:
@@ -31,7 +31,7 @@ def groups_list(
             client.get("/admin/groups", params={"offset": offset, "limit": limit})
         )
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -64,6 +64,9 @@ def groups_create(
         body["description"] = description
     with get_client() as client:
         data = handle_response(client.post("/admin/groups", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Group created:[/green] {data['id']}")
     console.print(f"  Name: {data['name']}")
 
@@ -72,14 +75,13 @@ def groups_create(
 def groups_show(
     group: str = typer.Argument(help="Group name (or ID with --use-ids)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
-    as_json: bool = JSON_OPTION,
 ):
     """Show group details."""
     with get_client() as client:
         group_id = group if use_ids else resolve_group(client, group)
         data = handle_response(client.get(f"/admin/groups/{group_id}"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -114,6 +116,9 @@ def groups_update(
     with get_client() as client:
         group_id = group if use_ids else resolve_group(client, group)
         data = handle_response(client.patch(f"/admin/groups/{group_id}", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Group updated:[/green] {data['name']}")
 
 
@@ -127,7 +132,10 @@ def groups_delete(
         group_id = group if use_ids else resolve_group(client, group)
         resp = client.delete(f"/admin/groups/{group_id}")
         if resp.status_code == 204:
-            console.print("[green]Group deleted.[/green]")
+            if json_mode():
+                print_json({"status": "deleted", "id": group_id})
+            else:
+                console.print("[green]Group deleted.[/green]")
         else:
             handle_response(resp)
 
@@ -139,9 +147,12 @@ def groups_add_permission(
 ):
     """Assign a permission to a group."""
     with get_client() as client:
-        handle_response(
+        data = handle_response(
             client.post(f"/admin/groups/{group_id}/permissions", json={"permission": permission})
         )
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Permission '{permission}' assigned to group.[/green]")
 
 
@@ -154,7 +165,10 @@ def groups_remove_permission(
     with get_client() as client:
         resp = client.delete(f"/admin/groups/{group_id}/permissions/{permission}")
         if resp.status_code == 204:
-            console.print(f"[green]Permission '{permission}' removed from group.[/green]")
+            if json_mode():
+                print_json({"status": "removed", "permission": permission})
+            else:
+                console.print(f"[green]Permission '{permission}' removed from group.[/green]")
         else:
             handle_response(resp)
 
@@ -169,6 +183,9 @@ def groups_add_member(
         data = handle_response(
             client.post(f"/admin/groups/{group_id}/members", json={"user_ids": user})
         )
+    if json_mode():
+        print_json(data)
+        return
     for m in data.get("members", []):
         console.print(f"  User {m['user_id'][:8]}...: {m['status']}")
 
@@ -182,6 +199,9 @@ def groups_remove_member(
     with get_client() as client:
         resp = client.delete(f"/admin/groups/{group_id}/members/{user}")
         if resp.status_code == 204:
-            console.print("[green]Member removed.[/green]")
+            if json_mode():
+                print_json({"status": "removed", "id": user})
+            else:
+                console.print("[green]Member removed.[/green]")
         else:
             handle_response(resp)

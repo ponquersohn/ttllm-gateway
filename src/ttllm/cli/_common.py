@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextvars
+import functools
+import inspect
 import json
 
 import httpx
@@ -14,10 +17,67 @@ console = Console()
 
 JSON_OPTION = typer.Option(False, "--json", help="Output raw JSON")
 
+_json_mode: contextvars.ContextVar[bool] = contextvars.ContextVar("json_mode", default=False)
+
+
+def json_mode() -> bool:
+    """Return True if the current command was invoked with --json."""
+    return _json_mode.get()
+
+
+def _inject_json(decorator, fn):
+    """Append a hidden --json option to a command/callback and expose it via json_mode().
+
+    Typer builds CLI flags from the function signature, so we inject a private
+    keyword-only parameter (bound to JSON_OPTION) into a wrapper's signature.
+    The wrapper stashes the value in a ContextVar that json_mode() reads, so
+    commands never need to declare a --json parameter themselves.
+    """
+    sig = inspect.signature(fn)
+    # Already wrapped (e.g. a function with both @command and @callback stacked):
+    # register as-is rather than injecting a duplicate parameter.
+    if "_json_out" in sig.parameters:
+        return decorator(fn)
+    params = list(sig.parameters.values()) + [
+        inspect.Parameter(
+            "_json_out",
+            inspect.Parameter.KEYWORD_ONLY,
+            default=JSON_OPTION,
+            annotation=bool,
+        )
+    ]
+
+    @functools.wraps(fn)
+    def inner(*args, _json_out=False, **kwargs):
+        token = _json_mode.set(_json_out)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _json_mode.reset(token)
+
+    inner.__signature__ = sig.replace(parameters=params)
+    return decorator(inner)
+
+
+class TtllmTyper(typer.Typer):
+    """Typer subclass that gives every command (and callback) a --json flag."""
+
+    def command(self, *args, **kwargs):
+        decorator = super().command(*args, **kwargs)
+        return lambda fn: _inject_json(decorator, fn)
+
+    def callback(self, *args, **kwargs):
+        decorator = super().callback(*args, **kwargs)
+        return lambda fn: _inject_json(decorator, fn)
+
 
 def print_json(data) -> None:
-    """Print data as formatted JSON and exit."""
-    console.print(json.dumps(data, indent=2, default=str), highlight=False)
+    """Print data as formatted JSON and exit.
+
+    soft_wrap avoids Rich inserting line breaks into long string values (e.g.
+    JWT tokens), which would otherwise corrupt the JSON when piped to a parser.
+    """
+    console.print(json.dumps(data, indent=2, default=str), highlight=False, soft_wrap=True)
 
 
 def get_client() -> TTLLMClient:

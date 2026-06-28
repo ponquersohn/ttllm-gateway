@@ -8,10 +8,10 @@ from typing import Optional
 import httpx
 import typer
 
-from ttllm.cli._common import console
+from ttllm.cli._common import TtllmTyper, console
 from ttllm.cli.client import ssl_context
 
-app = typer.Typer()
+app = TtllmTyper()
 
 
 def _handle_chat_error(resp: httpx.Response, model: str, url: str) -> None:

@@ -276,6 +276,7 @@ export ANTHROPIC_BASE_URL="https://gateway.example.com/anthropic"
 ```bash
 export ANTHROPIC_API_KEY="<your-gateway-token>"
 export ANTHROPIC_BASE_URL="https://gateway.example.com/anthropic"
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 export ANTHROPIC_DEFAULT_OPUS_MODEL="<model-for-opus>"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="<model-for-sonnet>"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="<model-for-haiku>"
@@ -285,10 +286,13 @@ claude
 
 Claude Code will route all requests through the gateway using the models available to your account.
 
+> **Model discovery:** set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` to make Claude Code's `/model` picker query the gateway's `GET /anthropic/v1/models` endpoint and list the models assigned to your account. Without it, Claude Code shows only its built-in model menu (gateway model discovery is gated off for non-first-party hosts), though you can still target any assigned model with `claude --model <name>`.
+
 ### Model override variables
 
 | Variable | Description |
 |---|---|
+| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | Set to `1` to let the `/model` picker discover models from the gateway's `/anthropic/v1/models` endpoint |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | Model to use for opus (and for Plan Mode) |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model to use for sonnet (and for Plan Mode when not active) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Model to use for haiku and background functionality |
@@ -305,6 +309,7 @@ Once verified, add the configuration to `.claude/settings.json` (or `.claude/set
   "env": {
     "ANTHROPIC_API_KEY": "<your-gateway-token>",
     "ANTHROPIC_BASE_URL": "https://gateway.example.com/anthropic",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "<model-for-opus>",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "<model-for-sonnet>",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<model-for-haiku>"
@@ -382,6 +387,7 @@ This revokes your refresh token on the server and removes the local session file
 | `TTLLM_TOKEN` | `ttllm chat` | -- | Gateway token for API calls |
 | `ANTHROPIC_API_KEY` | SDKs | -- | Gateway token (SDK usage) |
 | `ANTHROPIC_BASE_URL` | SDKs | -- | Gateway URL with `/anthropic` suffix |
+| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | Claude Code | -- | Set to `1` so the `/model` picker lists models from the gateway |
 
 ## Troubleshooting
 

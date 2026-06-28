@@ -9,11 +9,11 @@ from urllib.parse import parse_qs, urlparse
 
 import typer
 
-from ttllm.cli._common import JSON_OPTION, console, get_client, handle_response, print_json
+from ttllm.cli._common import TtllmTyper, console, get_client, handle_response, json_mode, print_json
 from ttllm.cli.client import TTLLMClient
 from ttllm.cli import audit, chat, groups, me, models, reports, rules, secrets, tokens, usage, users
 
-app = typer.Typer(name="ttllm", help="TTLLM Gateway CLI")
+app = TtllmTyper(name="ttllm", help="TTLLM Gateway CLI")
 
 app.add_typer(users.app, name="users")
 app.add_typer(models.app, name="models")
@@ -117,14 +117,12 @@ def logout():
 
 
 @app.command("whoami")
-def whoami(
-    as_json: bool = JSON_OPTION,
-):
+def whoami():
     """Show current user, groups, and permissions."""
     with get_client() as client:
         data = handle_response(client.get("/me"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -147,11 +145,11 @@ def whoami(
 
 
 @app.command("status")
-def status(as_json: bool = JSON_OPTION):
+def status():
     """Show server version, status, and configuration health checks."""
     with get_client() as client:
         data = handle_response(client.get("/admin/status"))
-    if as_json:
+    if json_mode():
         print_json(data)
         return
     console.print(f"[bold]Version:[/bold] {data['version']}")

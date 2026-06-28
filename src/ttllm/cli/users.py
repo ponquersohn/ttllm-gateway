@@ -8,22 +8,22 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
     resolve_user,
 )
 
-app = typer.Typer(help="Manage users")
+app = TtllmTyper(help="Manage users")
 
 
 @app.command("list")
 def users_list(
     offset: int = typer.Option(0, help="Offset for pagination"),
     limit: int = typer.Option(50, help="Limit for pagination"),
-    as_json: bool = JSON_OPTION,
 ):
     """List all users."""
     with get_client() as client:
@@ -31,7 +31,7 @@ def users_list(
             client.get("/admin/users", params={"offset": offset, "limit": limit})
         )
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -70,6 +70,9 @@ def users_create(
         body["password"] = password
     with get_client() as client:
         data = handle_response(client.post("/admin/users", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]User created:[/green] {data['id']}")
     console.print(f"  Name: {data['name']}")
     console.print(f"  Email: {data['email']}")
@@ -79,14 +82,13 @@ def users_create(
 def users_show(
     user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
-    as_json: bool = JSON_OPTION,
 ):
     """Show user details including groups and permissions."""
     with get_client() as client:
         user_id = user if use_ids else resolve_user(client, user)
         data = handle_response(client.get(f"/admin/users/{user_id}"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -108,14 +110,13 @@ def users_show(
 def users_models(
     user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
-    as_json: bool = JSON_OPTION,
 ):
     """List all models a user can access (direct + group assignments)."""
     with get_client() as client:
         user_id = user if use_ids else resolve_user(client, user)
         data = handle_response(client.get(f"/admin/users/{user_id}/models"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -163,6 +164,9 @@ def users_update(
     with get_client() as client:
         user_id = user if use_ids else resolve_user(client, user)
         data = handle_response(client.patch(f"/admin/users/{user_id}", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]User updated:[/green] {data['name']}")
 
 
@@ -176,7 +180,10 @@ def users_delete(
         user_id = user if use_ids else resolve_user(client, user)
         resp = client.delete(f"/admin/users/{user_id}")
         if resp.status_code == 204:
-            console.print("[green]User deactivated.[/green]")
+            if json_mode():
+                print_json({"status": "deactivated", "id": user_id})
+            else:
+                console.print("[green]User deactivated.[/green]")
         else:
             handle_response(resp)
 
@@ -185,14 +192,13 @@ def users_delete(
 def users_permissions(
     user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
-    as_json: bool = JSON_OPTION,
 ):
     """Show a user's direct and effective permissions."""
     with get_client() as client:
         user_id = user if use_ids else resolve_user(client, user)
         data = handle_response(client.get(f"/admin/users/{user_id}/permissions"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -219,6 +225,9 @@ def users_add_permission(
         data = handle_response(
             client.post(f"/admin/users/{user_id}/permissions", json={"permissions": permission})
         )
+    if json_mode():
+        print_json(data)
+        return
     for r in data.get("permissions", []):
         console.print(f"  {r['permission']}: {r['status']}")
 
@@ -234,6 +243,9 @@ def users_remove_permission(
         user_id = user if use_ids else resolve_user(client, user)
         resp = client.delete(f"/admin/users/{user_id}/permissions/{permission}")
         if resp.status_code == 204:
-            console.print(f"[green]Permission '{permission}' removed from user.[/green]")
+            if json_mode():
+                print_json({"status": "removed", "permission": permission})
+            else:
+                console.print(f"[green]Permission '{permission}' removed from user.[/green]")
         else:
             handle_response(resp)

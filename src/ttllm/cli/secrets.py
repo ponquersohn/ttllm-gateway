@@ -8,22 +8,22 @@ import typer
 from rich.table import Table
 
 from ttllm.cli._common import (
-    JSON_OPTION,
+    TtllmTyper,
     console,
     get_client,
     handle_response,
+    json_mode,
     print_json,
     resolve_secret,
 )
 
-app = typer.Typer(help="Manage secrets")
+app = TtllmTyper(help="Manage secrets")
 
 
 @app.command("list")
 def secrets_list(
     offset: int = typer.Option(0, help="Offset for pagination"),
     limit: int = typer.Option(50, help="Limit for pagination"),
-    as_json: bool = JSON_OPTION,
 ):
     """List all secrets (values are never shown)."""
     with get_client() as client:
@@ -31,7 +31,7 @@ def secrets_list(
             client.get("/admin/secrets", params={"offset": offset, "limit": limit})
         )
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -68,20 +68,22 @@ def secrets_create(
         body["description"] = description
     with get_client() as client:
         data = handle_response(client.post("/admin/secrets", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Secret created:[/green] {data['name']}")
 
 
 @app.command("show")
 def secrets_show(
     name: str = typer.Argument(help="Secret name"),
-    as_json: bool = JSON_OPTION,
 ):
     """Show secret metadata (value is never displayed)."""
     with get_client() as client:
         secret_id = resolve_secret(client, name)
         data = handle_response(client.get(f"/admin/secrets/{secret_id}"))
 
-    if as_json:
+    if json_mode():
         print_json(data)
         return
 
@@ -110,6 +112,9 @@ def secrets_update(
     with get_client() as client:
         secret_id = resolve_secret(client, name)
         data = handle_response(client.patch(f"/admin/secrets/{secret_id}", json=body))
+    if json_mode():
+        print_json(data)
+        return
     console.print(f"[green]Secret updated:[/green] {data['name']}")
 
 
@@ -122,6 +127,9 @@ def secrets_delete(
         secret_id = resolve_secret(client, name)
         resp = client.delete(f"/admin/secrets/{secret_id}")
         if resp.status_code == 204:
-            console.print("[green]Secret deleted.[/green]")
+            if json_mode():
+                print_json({"status": "deleted", "id": secret_id})
+            else:
+                console.print("[green]Secret deleted.[/green]")
         else:
             handle_response(resp)
