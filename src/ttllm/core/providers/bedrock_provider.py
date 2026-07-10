@@ -43,6 +43,7 @@ class BedrockState(ProviderState):
         self.content_blocks: list[ContentBlock] = []
         self._start = time.monotonic()
         self.latency_ms = 0
+        self.error: BaseException | None = None
 
     def mark_finished(self) -> None:
         """Stamp elapsed time. Called by the provider once the exchange completes."""

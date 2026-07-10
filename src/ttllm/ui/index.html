@@ -939,6 +939,13 @@ tr:hover td{background:rgba(0,0,0,.015)}
             chatMessages.scrollTop = chatMessages.scrollHeight;
           } else if (evt.type === "message_delta" && evt.usage) {
             outputTokens = evt.usage.output_tokens || 0;
+          } else if (evt.type === "error") {
+            var errMsg = (evt.error && evt.error.message) || "Streaming error";
+            var errEl = document.createElement("div");
+            errEl.className = "chat-msg-error";
+            errEl.textContent = "Error: " + errMsg;
+            assistantContent.appendChild(errEl);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
           }
         }
       }

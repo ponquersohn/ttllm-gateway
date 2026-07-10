@@ -74,6 +74,8 @@ def chat(
             body["stream"] = True
             input_tokens = 0
             output_tokens = 0
+            printed_any = False
+            saw_error = False
             with httpx.Client(timeout=timeout, verify=ssl_context()) as client:
                 with client.stream("POST", f"{url}/anthropic/v1/messages", json=body, headers=headers) as resp:
                     if resp.status_code != 200:
@@ -88,6 +90,7 @@ def chat(
                             delta = payload.get("delta", {})
                             if delta.get("type") == "text_delta":
                                 console.print(delta["text"], end="", highlight=False, markup=False)
+                                printed_any = True
                         elif event_type == "message_start":
                             msg = payload.get("message", {})
                             usage = msg.get("usage", {})
@@ -95,7 +98,17 @@ def chat(
                         elif event_type == "message_delta":
                             usage = payload.get("usage", {})
                             output_tokens = usage.get("output_tokens", 0)
-            console.print()  # final newline
+                        elif event_type == "error":
+                            saw_error = True
+                            err = payload.get("error", {}) or {}
+                            err_msg = err.get("message") or "Streaming error"
+                            if printed_any:
+                                console.print()
+                            console.print(f"[red]Error: {err_msg}[/red]")
+            if not printed_any and not saw_error:
+                console.print("[dim](no response)[/dim]")
+            else:
+                console.print()  # final newline
             if show_usage:
                 console.print(f"[dim]Tokens: {input_tokens} input, {output_tokens} output[/dim]")
     except httpx.ConnectError:
