@@ -78,6 +78,7 @@ docker run --rm -it \
     --network host \
     --env-file "${ENV_FILE}" \
     -e ANTHROPIC_API_KEY="${TOKEN_VALUE}" \
+    -e CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
     -v "${WORK_DIR}:/work" \
     -w /work \
     "${IMAGE}" "${@:-bash}"

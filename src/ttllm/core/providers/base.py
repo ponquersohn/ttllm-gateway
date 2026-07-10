@@ -39,6 +39,7 @@ class ProviderState(ABC):
 
     input_tokens: int
     output_tokens: int
+    error: BaseException | None
 
     @abstractmethod
     def get_cost(self) -> Decimal:

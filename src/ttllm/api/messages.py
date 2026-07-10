@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from typing import Annotated
@@ -256,9 +257,39 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
             await put_task
 
         async def producer() -> None:
+            producer_exc: Exception | None = None
             try:
-                async for event in sse_stream:
-                    await queue_event(event)
+                try:
+                    async for event in sse_stream:
+                        await queue_event(event)
+                except Exception as exc:
+                    producer_exc = exc
+                    logger.exception(
+                        "Streaming producer failed for request %s", request_id
+                    )
+                    # bedrock's own error paths set state.error before yielding a frame,
+                    # so only synthesize a frame here when nothing upstream did.
+                    if getattr(state, "error", None) is None:
+                        frame_data = {
+                            "type": "error",
+                            "error": {"type": "api_error", "message": str(exc)},
+                        }
+                        await queue_event(
+                            f"event: error\ndata: {json.dumps(frame_data)}\n\n"
+                        )
+
+                stream_exc = getattr(state, "error", None) or producer_exc
+                if stream_exc is not None:
+                    status, _error_type, _message = _classify_provider_error(stream_exc)
+                    finalize_status = status
+                    finalize_error = str(stream_exc)
+                elif client_disconnected.is_set():
+                    finalize_status = 499
+                    finalize_error = "Client disconnected during streaming response"
+                else:
+                    finalize_status = 200
+                    finalize_error = None
+
                 await _finalize(
                     state,
                     body,
@@ -267,12 +298,8 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
                     db,
                     request_id,
                     metadata,
-                    status_code=499 if client_disconnected.is_set() else 200,
-                    error_message=(
-                        "Client disconnected during streaming response"
-                        if client_disconnected.is_set()
-                        else None
-                    ),
+                    status_code=finalize_status,
+                    error_message=finalize_error,
                 )
             finally:
                 if not client_disconnected.is_set():

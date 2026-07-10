@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +36,8 @@ from ttllm.schemas.anthropic import (
 
 _CLIENT_CACHE: OrderedDict[str, Any] = OrderedDict()
 _CLIENT_CACHE_MAX = 32
+
+logger = logging.getLogger(__name__)
 
 # Bedrock prompt prefill on large contexts can exceed botocore's 60s default read
 # timeout before the first stream event arrives, so the default here is deliberately
@@ -445,12 +448,19 @@ async def stream_converse(
     try:
         response = await loop.run_in_executor(_BEDROCK_EXECUTOR, lambda: client.converse_stream(**params))
     except Exception as exc:
+        logger.exception("Bedrock stream failed for request %s", request_id)
+        if state is not None:
+            state.error = exc
         yield _sse_event("error", {"type": "error", "error": {"type": "api_error", "message": str(exc)}})
         return
 
     stream = response.get("stream")
     if not stream:
-        yield _sse_event("error", {"type": "error", "error": {"type": "api_error", "message": "No stream in response"}})
+        exc = RuntimeError("No stream in response")
+        logger.error("Bedrock stream failed for request %s: no stream in response", request_id)
+        if state is not None:
+            state.error = exc
+        yield _sse_event("error", {"type": "error", "error": {"type": "api_error", "message": str(exc)}})
         return
 
     block_index = 0
@@ -583,6 +593,9 @@ async def stream_converse(
                 cache_read = usage.get("cacheReadInputTokens", 0)
                 cache_write = usage.get("cacheWriteInputTokens", 0)
     except Exception as exc:
+        logger.exception("Bedrock stream failed for request %s", request_id)
+        if state is not None:
+            state.error = exc
         yield _sse_event("error", {"type": "error", "error": {"type": "api_error", "message": str(exc)}})
         return
     finally:
