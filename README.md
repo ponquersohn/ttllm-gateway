@@ -11,16 +11,34 @@ LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing 
 | System prompts | Yes | Yes |
 | Streaming (SSE) | Yes | Yes |
 | Tool use (client-defined) | Yes | Yes |
-| Image inputs (base64) | Yes | Yes |
-| Document inputs (PDF) | Yes | No |
-| Extended thinking | Yes | No |
+| Image inputs (base64) | Yes | Yes (including inside tool results) |
+| Document inputs (PDF) | Yes | No — 400 `invalid_request_error`¹ |
+| Extended thinking | Yes | Emulated (returned as plain text)¹ |
 | Token tracking & cost | Yes | Yes |
 | Cache token reporting | Yes | No |
 | Server-side tools | 501 (not proxied) | 501 (not proxied) |
 
+¹ Requests are translated through a provider-agnostic internal representation (see
+Architecture Note below); when the OpenAI-compatible provider can't faithfully represent a
+piece of content it either emulates it with a non-misleading substitute (extended thinking
+becomes plain text; an image inside a tool result is passed through as multimodal content —
+this used to crash) or returns an explicit 400 rather than silently dropping it (document
+inputs, since the model would otherwise answer as if it had read an attachment it never
+saw). See `docs/content-mapping.md` for the full per-content-type policy.
+
 ### Architecture Note
 
-Bedrock requests are handled via direct boto3 `converse()` / `converse_stream()` calls with full Anthropic-to-Bedrock format translation. This eliminates the LangChain translation layer for Bedrock, reducing latency and enabling native support for extended thinking, document inputs, and cache token reporting. OpenAI-compatible providers (Ollama, vLLM, etc.) continue to use LangChain.
+Requests cross a provider-agnostic internal representation (`core/model.py`) rather than
+being translated directly between wire formats: the Anthropic input adapter
+(`core/adapters/anthropic.py`) converts wire JSON to/from the internal representation once,
+and each provider translates the internal representation to/from its own wire format.
+Bedrock requests are handled via direct boto3 `converse()` / `converse_stream()` calls
+against that internal representation — no LangChain involved, which keeps latency low and
+enables native support for extended thinking, document inputs, and cache token reporting.
+OpenAI-compatible providers (Ollama, vLLM, etc.) translate the same internal representation
+to/from LangChain messages. Both providers stream through one shared Anthropic SSE encoder
+(`core/adapters/anthropic_stream.py`), so the wire protocol is implemented exactly once
+regardless of backend. See `docs/content-mapping.md` for the full mapping reference.
 
 ## Quick Start
 

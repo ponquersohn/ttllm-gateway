@@ -2,9 +2,10 @@
 
 ## Important Rules
 - **Keep README.md in sync**: When changing configuration options, CLI commands, Docker setup, release process, deployment, or any other topic covered in README.md, update the README to reflect those changes.
+- **Keep docs/content-mapping.md in sync**: When changing how a content type is represented internally, added/removed, or handled differently by a provider or input adapter (support/emulate/error/drop), update that file's mapping tables.
 
 ## Project Overview
-LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing requests through LangChain to any supported provider (Bedrock, OpenAI, etc.). Tracks tokens, costs, and maintains audit trails. Supports user management with per-user model access control.
+LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing requests through a provider-agnostic internal representation to any supported provider (Bedrock via direct boto3, OpenAI-compatible via LangChain). Tracks tokens, costs, and maintains audit trails. Supports user management with per-user model access control.
 
 ## Tech Stack
 - **Language**: Python 3.12+
@@ -20,8 +21,8 @@ LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing 
 - `services/` handles database operations, depends on core + SQLAlchemy
 - `api/` is a thin layer composing services via FastAPI dependency injection
 - `handlers/` contains deployment adapters (Lambda/ECS) — imports only the app factory
-- Anthropic API compatibility is the external contract; LangChain is the internal execution layer
-- Each provider is a stateless singleton; cost, the provider metadata blob, and the assembled response are owned by a per-request `ProviderState` (`core/providers/`). The gateway treats the state as opaque (`get_cost`/`get_metadata`/`get_response`). There is no shared cost helper — each state computes its own cost from its own fields, so new cost dimensions (cache, server tools, …) live entirely inside a provider.
+- Anthropic API compatibility is the external contract, but nothing below the API layer is Anthropic-shaped: requests/responses cross a provider-agnostic, API-agnostic internal representation (`core/model.py`). `core/adapters/anthropic.py` converts Anthropic wire JSON ⇄ `InternalRequest`/`InternalResult`; `core/gateway.py` and every `core/providers/*.py` file only ever see internal types, and carry zero dependency on `schemas/anthropic.py`. See `docs/content-mapping.md` for the full mapping between wire formats, the internal model, and each provider's support/emulate/error/drop policy per content type.
+- Each provider is a stateless singleton; cost, the provider metadata blob, and the assembled result are owned by a per-request `ProviderState` (`core/providers/`). The gateway treats the state as opaque (`get_cost`/`get_metadata`/`get_response`) — `get_response()` returns the internal-model result (`InternalResult`), not an external wire response; that conversion happens only at the API boundary via the relevant input adapter. There is no shared cost helper — each state computes its own cost from its own fields, so new cost dimensions (cache, server tools, …) live entirely inside a provider.
 
 ## Key Commands
 ```bash
@@ -86,8 +87,13 @@ src/ttllm/
 ├── db.py              # Async engine + session factory
 ├── models/            # SQLAlchemy ORM (users, auth, llm_models, model_assignments, audit_logs, audit_log_bodies)
 ├── schemas/           # Pydantic v2 (anthropic.py = wire format, auth.py, admin.py, common.py)
-├── core/              # Pure logic (permissions, jwt, oidc, password, gateway, translator, provider, streaming)
-│   └── providers/     # Provider abstraction: singleton providers + per-request ProviderState (owns cost/metadata/response)
+├── core/              # Pure logic (permissions, jwt, oidc, password, gateway, model, errors)
+│   ├── model.py        # Internal representation: InternalRequest/InternalResult/InternalChunk, the Part union
+│   ├── errors.py        # UnsupportedContentError, ServerToolError
+│   ├── adapters/        # Input-API wire format <-> internal representation (anthropic.py, anthropic_stream.py)
+│   └── providers/       # base.py (ProviderState/BaseProvider ABCs) + one subpackage per provider:
+│       ├── bedrock/      # provider.py (BedrockProvider/BedrockState), converse.py (Bedrock Converse wire translation)
+│       └── langchain/    # provider.py (LangChainProvider/LangChainState), translation.py (LangChain message translation), registry.py (ChatOpenAI factory cache)
 ├── services/          # DB operations (user, auth, group, model, audit, usage)
 ├── api/               # FastAPI (app.py, deps.py, auth.py, messages.py, admin.py)
 ├── handlers/          # Lambda (mangum) + ECS (uvicorn) entrypoints

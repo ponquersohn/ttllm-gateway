@@ -23,7 +23,7 @@ from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Any, AsyncIterator
 
-from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse
+from ttllm.core.model import InternalChunk, InternalRequest, InternalResult
 
 
 class ProviderState(ABC):
@@ -53,11 +53,14 @@ class ProviderState(ABC):
         """
 
     @abstractmethod
-    def get_response(self) -> MessagesResponse:
-        """The full Anthropic-format response for this exchange.
+    def get_response(self) -> InternalResult:
+        """The internal-model result for this exchange.
 
         For streaming this is rebuilt from the accumulated chunks; for non-streaming it is
-        the single parsed response. Same shape either way.
+        the single parsed result. Same shape either way. The API layer converts this to
+        the external wire format (e.g. Anthropic's ``MessagesResponse``) via the relevant
+        input adapter (``ttllm.core.adapters.anthropic.result_to_response``) -- providers
+        and the gateway never construct a wire-format response themselves.
         """
 
 
@@ -65,22 +68,22 @@ class BaseProvider(ABC):
     """Long-lived singleton. Owns connections/registries; holds NO request state.
 
     ``invoke`` runs a non-streaming request and returns the fully populated state.
-    ``stream`` returns ``(state, sse)``: the state fills as the caller drains the SSE
-    iterator, and is read (via its getters) after the stream is exhausted.
+    ``stream`` returns ``(state, chunks)``: the state fills as the caller drains the
+    chunk iterator, and is read (via its getters) after the stream is exhausted.
     """
 
     @abstractmethod
     async def invoke(
-        self, request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
+        self, request: InternalRequest, llm_model: Any, request_id: uuid.UUID
     ) -> ProviderState:
         """Execute a non-streaming request and return the filled state."""
 
     @abstractmethod
     def stream(
-        self, request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
-    ) -> tuple[ProviderState, AsyncIterator[str]]:
+        self, request: InternalRequest, llm_model: Any, request_id: uuid.UUID
+    ) -> tuple[ProviderState, AsyncIterator[InternalChunk]]:
         """Start a streaming request.
 
-        Returns ``(state, sse_iterator)``. The state is empty until the caller drains the
+        Returns ``(state, chunks)``. The state is empty until the caller drains the
         iterator, after which its getters can be read.
         """

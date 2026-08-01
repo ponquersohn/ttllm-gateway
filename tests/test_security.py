@@ -13,7 +13,7 @@ from ttllm.core.oidc import (
     extract_roles_from_id_token_payload,
     verify_id_token,
 )
-from ttllm.core.provider import _validate_base_url
+from ttllm.core.providers.langchain.registry import _validate_base_url
 from ttllm.schemas.admin import _REDACTED, _redact_dict
 
 
@@ -172,53 +172,53 @@ class TestValidateBaseUrl:
     """SSRF protection via allowed_base_urls regex + private IP blocking."""
 
     def test_no_allowed_urls_rejects(self):
-        with patch("ttllm.core.provider.settings") as mock_settings:
+        with patch("ttllm.core.providers.langchain.registry.settings") as mock_settings:
             mock_settings.provider.allowed_base_urls = []
             with pytest.raises(ValueError, match="No allowed_base_urls configured"):
                 _validate_base_url("https://api.openai.com/v1")
 
     def test_matching_pattern_allowed(self):
-        with patch("ttllm.core.provider.settings") as mock_settings:
+        with patch("ttllm.core.providers.langchain.registry.settings") as mock_settings:
             mock_settings.provider.allowed_base_urls = [r"https://api\.openai\.com/.*"]
             mock_settings.provider.allow_private_targets = False
             _validate_base_url("https://api.openai.com/v1")
 
     def test_non_matching_pattern_rejected(self):
-        with patch("ttllm.core.provider.settings") as mock_settings:
+        with patch("ttllm.core.providers.langchain.registry.settings") as mock_settings:
             mock_settings.provider.allowed_base_urls = [r"https://api\.openai\.com/.*"]
             mock_settings.provider.allow_private_targets = False
             with pytest.raises(ValueError, match="does not match"):
                 _validate_base_url("https://evil.com/v1")
 
     def test_metadata_endpoint_blocked(self):
-        with patch("ttllm.core.provider.settings") as mock_settings:
+        with patch("ttllm.core.providers.langchain.registry.settings") as mock_settings:
             mock_settings.provider.allowed_base_urls = [r"https?://.*"]
             mock_settings.provider.allow_private_targets = False
             with pytest.raises(ValueError, match="blocked metadata"):
                 _validate_base_url("http://169.254.169.254/latest/meta-data")
 
     def test_metadata_blocked_even_with_private_targets(self):
-        with patch("ttllm.core.provider.settings") as mock_settings:
+        with patch("ttllm.core.providers.langchain.registry.settings") as mock_settings:
             mock_settings.provider.allowed_base_urls = [r"https?://.*"]
             mock_settings.provider.allow_private_targets = True
             with pytest.raises(ValueError, match="blocked metadata"):
                 _validate_base_url("http://169.254.169.254/latest/meta-data")
 
     def test_private_ip_blocked(self):
-        with patch("ttllm.core.provider.settings") as mock_settings:
+        with patch("ttllm.core.providers.langchain.registry.settings") as mock_settings:
             mock_settings.provider.allowed_base_urls = [r"https?://.*"]
             mock_settings.provider.allow_private_targets = False
             with pytest.raises(ValueError, match="private address"):
                 _validate_base_url("http://10.0.0.1/api")
 
     def test_private_ip_allowed_when_configured(self):
-        with patch("ttllm.core.provider.settings") as mock_settings:
+        with patch("ttllm.core.providers.langchain.registry.settings") as mock_settings:
             mock_settings.provider.allowed_base_urls = [r"https?://.*"]
             mock_settings.provider.allow_private_targets = True
             _validate_base_url("http://10.0.0.1/api")
 
     def test_loopback_blocked(self):
-        with patch("ttllm.core.provider.settings") as mock_settings:
+        with patch("ttllm.core.providers.langchain.registry.settings") as mock_settings:
             mock_settings.provider.allowed_base_urls = [r"https?://.*"]
             mock_settings.provider.allow_private_targets = False
             with pytest.raises(ValueError, match="private address"):

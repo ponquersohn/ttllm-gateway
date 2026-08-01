@@ -77,7 +77,7 @@ async def update_secret(
     await db.refresh(secret)
 
     # Invalidate provider cache so stale credentials are not reused
-    from ttllm.core.provider import registry
+    from ttllm.core.providers.langchain.registry import registry
     registry.clear_cache()
 
     return secret
@@ -90,7 +90,7 @@ async def delete_secret(db: AsyncSession, secret_id: uuid.UUID) -> bool:
     await db.delete(secret)
     await db.commit()
 
-    from ttllm.core.provider import registry
+    from ttllm.core.providers.langchain.registry import registry
     registry.clear_cache()
 
     return True

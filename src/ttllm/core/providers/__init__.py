@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import Any
 
 from ttllm.core.providers.base import BaseProvider, ProviderState
-from ttllm.core.providers.bedrock_provider import BedrockProvider
-from ttllm.core.providers.langchain_provider import LangChainProvider
+from ttllm.core.providers.bedrock.provider import BedrockProvider
+from ttllm.core.providers.langchain.provider import LangChainProvider
 
 _BEDROCK = BedrockProvider()
 _LANGCHAIN = LangChainProvider()

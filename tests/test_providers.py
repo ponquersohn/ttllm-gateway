@@ -1,17 +1,17 @@
-"""Tests for the provider abstraction: selection, Bedrock invoke/stream, state population."""
+"""Tests for the provider abstraction: selection, Bedrock/LangChain invoke/stream, state population."""
 
 from __future__ import annotations
 
 import uuid
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ttllm.core.model import InternalMessage, InternalRequest, TextPart
 from ttllm.core.providers import get_provider
-from ttllm.core.providers.bedrock_provider import BedrockProvider, BedrockState
-from ttllm.core.providers.langchain_provider import LangChainProvider
-from ttllm.schemas.anthropic import Message, MessagesRequest
+from ttllm.core.providers.bedrock.provider import BedrockProvider, BedrockState
+from ttllm.core.providers.langchain.provider import LangChainProvider, LangChainState
 
 
 def _make_model(provider="bedrock", **overrides):
@@ -29,14 +29,14 @@ def _make_model(provider="bedrock", **overrides):
     return model
 
 
-def _make_request(**kwargs) -> MessagesRequest:
+def _make_request(**kwargs) -> InternalRequest:
     defaults = {
-        "model": "claude-sonnet",
+        "provider_model_id": "anthropic.claude-sonnet-4-20250514-v1:0",
         "max_tokens": 1024,
-        "messages": [Message(role="user", content="Hello")],
+        "messages": [InternalMessage(role="user", content=[TextPart(text="Hello")])],
     }
     defaults.update(kwargs)
-    return MessagesRequest(**defaults)
+    return InternalRequest(**defaults)
 
 
 def _make_stream_response(events):
@@ -88,7 +88,7 @@ class TestBedrockProviderInvoke:
             },
         }
 
-        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+        with patch("ttllm.core.providers.bedrock.converse.get_boto3_client") as mock_get_client:
             mock_client = MagicMock()
             mock_client.converse.return_value = raw_response
             mock_get_client.return_value = mock_client
@@ -131,18 +131,67 @@ class TestBedrockProviderStream:
             }}},
         ]
 
-        with patch("ttllm.core.bedrock.get_boto3_client") as mock_get_client:
+        with patch("ttllm.core.providers.bedrock.converse.get_boto3_client") as mock_get_client:
             mock_client = MagicMock()
             mock_client.converse_stream.return_value = _make_stream_response(events)
             mock_get_client.return_value = mock_client
 
-            state, sse = provider.stream(_make_request(), model, uuid.uuid4())
-            collected = [ev async for ev in sse]
+            state, chunks = provider.stream(_make_request(), model, uuid.uuid4())
+            collected = [c async for c in chunks]
 
-        # SSE was emitted to the client AND the state was populated for finalize.
-        assert any("message_stop" in ev for ev in collected)
+        # Chunks were emitted for the caller AND the state was populated for finalize.
+        assert any(c.kind.value == "message_stop" for c in collected)
         assert state.input_tokens == 10
         assert state.output_tokens == 5
         # Rebuilt response reassembles the text deltas.
+        assert state.get_response().content[0].text == "Hi there"
+        assert state.latency_ms >= 0
+
+
+class TestLangChainProviderInvoke:
+    @pytest.mark.asyncio
+    async def test_invoke_populates_state(self):
+        from langchain_core.messages import AIMessage
+
+        provider = LangChainProvider()
+        model = _make_model(provider="openai")
+
+        response = AIMessage(content="Hello there")
+        response.usage_metadata = {"input_tokens": 12, "output_tokens": 6}
+
+        fake_chat_model = MagicMock()
+        fake_chat_model.bind_tools.return_value = fake_chat_model
+        fake_chat_model.ainvoke = AsyncMock(return_value=response)
+
+        with patch("ttllm.core.providers.langchain.registry.registry.get_chat_model", return_value=fake_chat_model):
+            state = await provider.invoke(_make_request(), model, uuid.uuid4())
+
+        assert isinstance(state, LangChainState)
+        assert state.input_tokens == 12
+        assert state.output_tokens == 6
+        assert state.get_response().content[0].text == "Hello there"
+
+
+class TestLangChainProviderStream:
+    @pytest.mark.asyncio
+    async def test_stream_populates_state(self):
+        from langchain_core.messages import AIMessageChunk
+
+        provider = LangChainProvider()
+        model = _make_model(provider="openai")
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(content="Hi ")
+            yield AIMessageChunk(content="there")
+
+        fake_chat_model = MagicMock()
+        fake_chat_model.bind_tools.return_value = fake_chat_model
+        fake_chat_model.astream = fake_astream
+
+        with patch("ttllm.core.providers.langchain.registry.registry.get_chat_model", return_value=fake_chat_model):
+            state, chunks = provider.stream(_make_request(), model, uuid.uuid4())
+            collected = [c async for c in chunks]
+
+        assert any(c.kind.value == "message_stop" for c in collected)
         assert state.get_response().content[0].text == "Hi there"
         assert state.latency_ms >= 0
