@@ -4,6 +4,12 @@ Cost, metadata, and response assembly are owned by the provider's ``ProviderStat
 ``ttllm.core.providers``). The gateway only dispatches: it picks the singleton provider for
 the model and hands back the state, which the API layer reads (``get_cost`` /
 ``get_metadata`` / ``get_response``) when it writes the audit row.
+
+Operates purely on the internal representation (``ttllm.core.model``) -- it has no
+knowledge of any external wire format. It also has no opinion on provider capabilities: an
+``InternalRequest`` may reference server-side tools, and it's up to the selected provider's
+translation code to decide whether it can proxy them (raising ``ServerToolError`` if not) --
+the gateway just dispatches.
 """
 
 from __future__ import annotations
@@ -11,51 +17,29 @@ from __future__ import annotations
 import uuid
 from typing import Any, AsyncIterator
 
+from ttllm.core.model import InternalChunk, InternalRequest
 from ttllm.core.providers import ProviderState, get_provider
-from ttllm.schemas.anthropic import MessagesRequest, ServerToolDefinition
-
-
-class ServerToolError(Exception):
-    """Raised when a request contains server-side tools that cannot be proxied."""
-
-    pass
-
-
-def _has_server_tools(request: MessagesRequest) -> bool:
-    if not request.tools:
-        return False
-    return any(isinstance(t, ServerToolDefinition) for t in request.tools)
-
-
-def _check_server_tools(request: MessagesRequest) -> None:
-    if _has_server_tools(request):
-        raise ServerToolError(
-            "Server-side tools (web_search, code_execution) cannot be proxied through the gateway. "
-            "Remove server tool definitions and handle them client-side."
-        )
 
 
 async def invoke(
-    request: MessagesRequest,
+    request: InternalRequest,
     llm_model: Any,
     request_id: uuid.UUID,
 ) -> ProviderState:
     """Execute a non-streaming LLM request and return the filled provider state."""
-    _check_server_tools(request)
     provider = get_provider(llm_model)
     return await provider.invoke(request, llm_model, request_id)
 
 
 def stream(
-    request: MessagesRequest,
+    request: InternalRequest,
     llm_model: Any,
     request_id: uuid.UUID,
-) -> tuple[ProviderState, AsyncIterator[str]]:
+) -> tuple[ProviderState, AsyncIterator[InternalChunk]]:
     """Start a streaming LLM request.
 
-    Returns ``(state, sse_iterator)``. The state fills as the caller drains the iterator,
+    Returns ``(state, chunks)``. The state fills as the caller drains the iterator,
     and its getters can be read once the stream is exhausted.
     """
-    _check_server_tools(request)
     provider = get_provider(llm_model)
     return provider.stream(request, llm_model, request_id)

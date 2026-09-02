@@ -16,10 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ttllm.api.deps import AuthContext, DB, _authenticate, get_db, require_permission
 from ttllm.config import settings
 from ttllm.core import gateway
-from ttllm.core.gateway import ServerToolError
+from ttllm.core.adapters import anthropic as anthropic_adapter
+from ttllm.core.adapters.anthropic_stream import encode_anthropic_sse
+from ttllm.core.errors import ServerToolError, UnsupportedContentError
 from ttllm.core.permissions import Permissions
 from ttllm.core.rules import ActionType
-from ttllm.schemas.anthropic import MessagesRequest
+from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse
 from ttllm.services import audit_service, model_service, rules_service, secret_service
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,9 @@ def _classify_provider_error(exc: Exception) -> tuple[int, str, str]:
     """Return (http_status, anthropic_error_type, message) for a provider exception."""
     if isinstance(exc, ServerToolError):
         return (501, "not_implemented_error", str(exc))
+
+    if isinstance(exc, UnsupportedContentError):
+        return (400, "invalid_request_error", str(exc))
 
     if isinstance(exc, ReadTimeoutError):
         return (529, "overloaded_error", "Model request timed out — try again or use streaming")
@@ -170,12 +175,16 @@ async def _finalize(
     *,
     status_code: int = 200,
     error_message: str | None = None,
+    response: MessagesResponse | None = None,
 ):
     """Write the audit row from a completed provider state.
 
     Shared by both the streaming and non-streaming paths — the only difference is when the
     state has been populated. The state is opaque here: we read its getters and token fields
     and never reach inside it. ``get_metadata()`` includes the provider-computed latency.
+    ``response`` is the already-converted Anthropic wire response (``state.get_response()``
+    is the internal-model result, not the wire shape, so the caller converts it once via
+    ``anthropic_adapter.result_to_response`` and passes it in here for the audit body).
     """
     provider_metadata = state.get_metadata()
     await audit_service.log_request(
@@ -192,7 +201,7 @@ async def _finalize(
         metadata_json=metadata,
         provider_metadata=provider_metadata,
         request_body=body.model_dump() if settings.engine.log_request_bodies else None,
-        response_body=state.get_response().model_dump() if settings.engine.log_request_bodies else None,
+        response_body=response.model_dump() if response and settings.engine.log_request_bodies else None,
     )
 
 
@@ -216,9 +225,10 @@ async def _log_error(exc, llm_model, user, db, request_id, metadata):
 
 async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
     try:
-        state = await gateway.invoke(body, llm_model, request_id)
-        response = state.get_response()
-        await _finalize(state, body, llm_model, user, db, request_id, metadata)
+        internal_request = anthropic_adapter.request_to_internal(body, llm_model)
+        state = await gateway.invoke(internal_request, llm_model, request_id)
+        response = anthropic_adapter.result_to_response(state.get_response(), llm_model.name, request_id)
+        await _finalize(state, body, llm_model, user, db, request_id, metadata, response=response)
         return JSONResponse(content=response.model_dump())
 
     except Exception as exc:
@@ -233,7 +243,9 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
 
 async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
     try:
-        state, sse_stream = gateway.stream(body, llm_model, request_id)
+        internal_request = anthropic_adapter.request_to_internal(body, llm_model)
+        state, chunk_stream = gateway.stream(internal_request, llm_model, request_id)
+        sse_stream = encode_anthropic_sse(chunk_stream, llm_model.name, request_id)
         client_disconnected = asyncio.Event()
         queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=16)
 
@@ -290,6 +302,11 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
                     finalize_status = 200
                     finalize_error = None
 
+                response = (
+                    anthropic_adapter.result_to_response(state.get_response(), llm_model.name, request_id)
+                    if finalize_status == 200
+                    else None
+                )
                 await _finalize(
                     state,
                     body,
@@ -300,6 +317,7 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
                     metadata,
                     status_code=finalize_status,
                     error_message=finalize_error,
+                    response=response,
                 )
             finally:
                 if not client_disconnected.is_set():

@@ -9,8 +9,8 @@ from decimal import Decimal
 
 from langchain_core.messages import AIMessage
 
-from ttllm.core.providers.bedrock_provider import BedrockState
-from ttllm.core.providers.langchain_provider import LangChainState, _read_token_counts
+from ttllm.core.providers.bedrock.provider import BedrockState
+from ttllm.core.providers.langchain.provider import LangChainState, _read_token_counts
 
 
 class _Pricing:

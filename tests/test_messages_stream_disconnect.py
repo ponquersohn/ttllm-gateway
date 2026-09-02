@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from ttllm.api.messages import _handle_streaming
-from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse, TextBlock, Usage
+from ttllm.core.model import InternalResult, InternalUsage, TextPart
+from ttllm.schemas.anthropic import MessagesRequest
 
 
 class FakeStreamState:
@@ -29,13 +30,17 @@ class FakeStreamState:
             "cost": {"total": str(self.get_cost())},
         }
 
-    def get_response(self) -> MessagesResponse:
-        return MessagesResponse(
-            id="msg_disconnect",
-            model="claude-test",
-            content=[TextBlock(text="completed upstream")],
-            usage=Usage(input_tokens=self.input_tokens, output_tokens=self.output_tokens),
+    def get_response(self) -> InternalResult:
+        return InternalResult(
+            content=[TextPart(text="completed upstream")],
+            stop_reason="end_turn",
+            usage=InternalUsage(input_tokens=self.input_tokens, output_tokens=self.output_tokens),
         )
+
+
+async def _empty_chunk_stream():
+    return
+    yield  # pragma: no cover -- makes this an async generator
 
 
 @pytest.mark.asyncio
@@ -44,7 +49,7 @@ async def test_stream_disconnect_drains_provider_and_logs_final_cost(monkeypatch
     metadata_ready = asyncio.Event()
     audit_rows: list[dict] = []
 
-    async def fake_sse_stream():
+    async def fake_encoded_sse(chunks, model_name, request_id):
         yield "event: message_start\ndata: {}\n\n"
         await metadata_ready.wait()
         state.input_tokens = 100
@@ -53,14 +58,15 @@ async def test_stream_disconnect_drains_provider_and_logs_final_cost(monkeypatch
         yield "event: message_delta\ndata: {}\n\n"
         yield "event: message_stop\ndata: {}\n\n"
 
-    def fake_gateway_stream(body, llm_model, request_id):
-        return state, fake_sse_stream()
+    def fake_gateway_stream(request, llm_model, request_id):
+        return state, _empty_chunk_stream()
 
     async def fake_log_request(db, **kwargs):
         audit_rows.append(kwargs)
         return SimpleNamespace(id=uuid.uuid4(), **kwargs)
 
     monkeypatch.setattr("ttllm.api.messages.gateway.stream", fake_gateway_stream)
+    monkeypatch.setattr("ttllm.api.messages.encode_anthropic_sse", fake_encoded_sse)
     monkeypatch.setattr("ttllm.api.messages.audit_service.log_request", fake_log_request)
 
     body = MessagesRequest(
@@ -69,7 +75,9 @@ async def test_stream_disconnect_drains_provider_and_logs_final_cost(monkeypatch
         max_tokens=128,
         stream=True,
     )
-    model = SimpleNamespace(id=uuid.uuid4())
+    model = SimpleNamespace(
+        id=uuid.uuid4(), name="claude-test", provider_model_id="claude-test", config_json={}
+    )
     user = SimpleNamespace(id=uuid.uuid4())
     response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {})
 
@@ -103,17 +111,18 @@ async def test_stream_provider_error_records_audit_row(monkeypatch):
     state.error = RuntimeError("Unable to locate credentials")
     audit_rows: list[dict] = []
 
-    async def fake_sse_stream():
+    async def fake_encoded_sse(chunks, model_name, request_id):
         yield 'event: error\ndata: {"type": "error", "error": {"type": "api_error", "message": "Unable to locate credentials"}}\n\n'
 
-    def fake_gateway_stream(body, llm_model, request_id):
-        return state, fake_sse_stream()
+    def fake_gateway_stream(request, llm_model, request_id):
+        return state, _empty_chunk_stream()
 
     async def fake_log_request(db, **kwargs):
         audit_rows.append(kwargs)
         return SimpleNamespace(id=uuid.uuid4(), **kwargs)
 
     monkeypatch.setattr("ttllm.api.messages.gateway.stream", fake_gateway_stream)
+    monkeypatch.setattr("ttllm.api.messages.encode_anthropic_sse", fake_encoded_sse)
     monkeypatch.setattr("ttllm.api.messages.audit_service.log_request", fake_log_request)
 
     body = MessagesRequest(
@@ -122,7 +131,9 @@ async def test_stream_provider_error_records_audit_row(monkeypatch):
         max_tokens=128,
         stream=True,
     )
-    model = SimpleNamespace(id=uuid.uuid4())
+    model = SimpleNamespace(
+        id=uuid.uuid4(), name="claude-test", provider_model_id="claude-test", config_json={}
+    )
     user = SimpleNamespace(id=uuid.uuid4())
     response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {})
 
@@ -143,18 +154,19 @@ async def test_stream_generator_raises_records_audit_row(monkeypatch):
     state = FakeStreamState()
     audit_rows: list[dict] = []
 
-    async def fake_sse_stream():
+    async def fake_encoded_sse(chunks, model_name, request_id):
         yield "event: message_start\ndata: {}\n\n"
         raise RuntimeError("upstream exploded")
 
-    def fake_gateway_stream(body, llm_model, request_id):
-        return state, fake_sse_stream()
+    def fake_gateway_stream(request, llm_model, request_id):
+        return state, _empty_chunk_stream()
 
     async def fake_log_request(db, **kwargs):
         audit_rows.append(kwargs)
         return SimpleNamespace(id=uuid.uuid4(), **kwargs)
 
     monkeypatch.setattr("ttllm.api.messages.gateway.stream", fake_gateway_stream)
+    monkeypatch.setattr("ttllm.api.messages.encode_anthropic_sse", fake_encoded_sse)
     monkeypatch.setattr("ttllm.api.messages.audit_service.log_request", fake_log_request)
 
     body = MessagesRequest(
@@ -163,7 +175,9 @@ async def test_stream_generator_raises_records_audit_row(monkeypatch):
         max_tokens=128,
         stream=True,
     )
-    model = SimpleNamespace(id=uuid.uuid4())
+    model = SimpleNamespace(
+        id=uuid.uuid4(), name="claude-test", provider_model_id="claude-test", config_json={}
+    )
     user = SimpleNamespace(id=uuid.uuid4())
     response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {})
 

@@ -1,9 +1,9 @@
 """Bedrock provider + per-request state.
 
 ``BedrockProvider`` is a stateless singleton that drives the boto3 Converse API (the heavy
-client/executor machinery lives in ``ttllm.core.bedrock``). ``BedrockState`` accumulates one
-request's tokens, cache counts, raw usage payload and assembled content, and owns the Bedrock
-cost formula (input + output + cache read + cache write) and metadata blob.
+client/executor machinery lives in ``ttllm.core.providers.bedrock.converse``). ``BedrockState``
+accumulates one request's tokens, cache counts, raw usage payload and assembled content, and
+owns the Bedrock cost formula (input + output + cache read + cache write) and metadata blob.
 """
 
 from __future__ import annotations
@@ -13,15 +13,9 @@ import uuid
 from decimal import Decimal
 from typing import Any, AsyncIterator
 
-from ttllm.core import bedrock
+from ttllm.core.model import InternalChunk, InternalRequest, InternalResult, InternalUsage, Part, TextPart
 from ttllm.core.providers.base import BaseProvider, ProviderState
-from ttllm.schemas.anthropic import (
-    ContentBlock,
-    MessagesRequest,
-    MessagesResponse,
-    TextBlock,
-    Usage,
-)
+from ttllm.core.providers.bedrock import converse as bedrock
 
 
 def _cost(tokens: int, rate: Any) -> Decimal:
@@ -40,7 +34,7 @@ class BedrockState(ProviderState):
         self.cache_write_tokens = 0
         self.raw_usage: dict[str, Any] = {}
         self.stop_reason = "end_turn"
-        self.content_blocks: list[ContentBlock] = []
+        self.content_parts: list[Part] = []
         self._start = time.monotonic()
         self.latency_ms = 0
         self.error: BaseException | None = None
@@ -80,18 +74,16 @@ class BedrockState(ProviderState):
             },
         }
 
-    def get_response(self) -> MessagesResponse:
-        blocks = self.content_blocks or [TextBlock(text="")]
-        return MessagesResponse(
-            id=f"msg_{self.request_id.hex[:24]}",
-            content=blocks,
-            model=self.llm_model.name,
+    def get_response(self) -> InternalResult:
+        parts = self.content_parts or [TextPart(text="")]
+        return InternalResult(
+            content=parts,
             stop_reason=self.stop_reason,
-            usage=Usage(
+            usage=InternalUsage(
                 input_tokens=self.input_tokens,
                 output_tokens=self.output_tokens,
-                cache_creation_input_tokens=self.cache_write_tokens or None,
-                cache_read_input_tokens=self.cache_read_tokens or None,
+                cache_read_tokens=self.cache_read_tokens,
+                cache_write_tokens=self.cache_write_tokens,
             ),
         )
 
@@ -100,34 +92,32 @@ class BedrockProvider(BaseProvider):
     """Stateless singleton driving the Bedrock Converse API."""
 
     async def invoke(
-        self, request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
+        self, request: InternalRequest, llm_model: Any, request_id: uuid.UUID
     ) -> BedrockState:
         state = BedrockState(llm_model, request_id)
         raw = await bedrock._converse_raw(request, llm_model)
-        response, cache_read, cache_write = bedrock.parse_converse_response(
-            raw, llm_model.name, request_id
-        )
-        state.input_tokens = response.usage.input_tokens
-        state.output_tokens = response.usage.output_tokens
-        state.cache_read_tokens = cache_read
-        state.cache_write_tokens = cache_write
+        result = bedrock.parse_converse_response(raw)
+        state.input_tokens = result.usage.input_tokens
+        state.output_tokens = result.usage.output_tokens
+        state.cache_read_tokens = result.usage.cache_read_tokens
+        state.cache_write_tokens = result.usage.cache_write_tokens
         state.raw_usage = raw.get("usage", {})
-        state.stop_reason = response.stop_reason or "end_turn"
-        state.content_blocks = list(response.content)
+        state.stop_reason = result.stop_reason
+        state.content_parts = list(result.content)
         state.mark_finished()
         return state
 
     def stream(
-        self, request: MessagesRequest, llm_model: Any, request_id: uuid.UUID
-    ) -> tuple[BedrockState, AsyncIterator[str]]:
+        self, request: InternalRequest, llm_model: Any, request_id: uuid.UUID
+    ) -> tuple[BedrockState, AsyncIterator[InternalChunk]]:
         state = BedrockState(llm_model, request_id)
 
-        async def _gen() -> AsyncIterator[str]:
+        async def _gen() -> AsyncIterator[InternalChunk]:
             try:
-                async for event in bedrock.stream_converse(
+                async for chunk in bedrock.stream_converse_chunks(
                     request, llm_model, request_id, state=state
                 ):
-                    yield event
+                    yield chunk
             finally:
                 state.mark_finished()
 

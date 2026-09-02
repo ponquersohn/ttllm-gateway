@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ttllm.core.provider import ProviderRegistry
+from ttllm.core.providers.langchain.registry import ProviderRegistry
 
 
 class TestProviderRegistry:
