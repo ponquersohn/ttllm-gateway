@@ -114,6 +114,11 @@ class TestBuildConverseRequest:
         result = build_converse_request(request, _make_model())
         assert "additionalModelRequestFields" not in result
 
+    def test_thinking_adaptive_omits_budget_tokens(self):
+        request = _make_request(thinking=ThinkingConfig(enabled=True, type="adaptive"))
+        result = build_converse_request(request, _make_model())
+        assert result["additionalModelRequestFields"]["thinking"] == {"type": "adaptive"}
+
     def test_tool_definitions(self):
         tools = [
             ToolSpec(

@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from ttllm.core.errors import UnsupportedContentError
 from ttllm.core.model import (
     DocumentPart,
     ImagePart,
@@ -174,8 +175,17 @@ def _server_tools_to_internal(tools: list[ToolDefinition | ServerToolDefinition]
 def _thinking_to_internal(thinking: dict[str, Any] | None) -> ThinkingConfig | None:
     if not thinking:
         return None
-    enabled = thinking.get("type", "enabled") != "disabled"
-    return ThinkingConfig(enabled=enabled, budget_tokens=thinking.get("budget_tokens"))
+    thinking_type = thinking.get("type", "enabled")
+    if thinking_type == "disabled":
+        return ThinkingConfig(enabled=False)
+    if thinking_type == "adaptive":
+        return ThinkingConfig(enabled=True, type="adaptive")
+    budget_tokens = thinking.get("budget_tokens")
+    if not isinstance(budget_tokens, int):
+        raise UnsupportedContentError(
+            "thinking.budget_tokens is required and must be an integer when thinking.type is 'enabled'"
+        )
+    return ThinkingConfig(enabled=True, type="enabled", budget_tokens=budget_tokens)
 
 
 def request_to_internal(request: MessagesRequest, llm_model: Any) -> InternalRequest:
