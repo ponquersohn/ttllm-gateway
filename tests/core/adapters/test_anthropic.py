@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from ttllm.core.adapters.anthropic import request_to_internal, result_to_response
+from ttllm.core.errors import UnsupportedContentError
 from ttllm.core.model import InternalResult, InternalUsage, TextPart, ThinkingPart, ToolCallPart
 from ttllm.schemas.anthropic import (
     DocumentBlock,
@@ -274,11 +275,29 @@ class TestRequestToInternal:
         request = _make_request(thinking={"type": "enabled", "budget_tokens": 2000})
         internal = request_to_internal(request, _make_model())
         assert internal.thinking.enabled is True
+        assert internal.thinking.type == "enabled"
         assert internal.thinking.budget_tokens == 2000
 
     def test_no_thinking(self):
         internal = request_to_internal(_make_request(), _make_model())
         assert internal.thinking is None
+
+    def test_thinking_disabled(self):
+        request = _make_request(thinking={"type": "disabled"})
+        internal = request_to_internal(request, _make_model())
+        assert internal.thinking.enabled is False
+
+    def test_thinking_adaptive(self):
+        request = _make_request(thinking={"type": "adaptive"})
+        internal = request_to_internal(request, _make_model())
+        assert internal.thinking.enabled is True
+        assert internal.thinking.type == "adaptive"
+        assert internal.thinking.budget_tokens is None
+
+    def test_thinking_enabled_without_budget_tokens_raises(self):
+        request = _make_request(thinking={"type": "enabled"})
+        with pytest.raises(UnsupportedContentError):
+            request_to_internal(request, _make_model())
 
 
 class TestResultToResponse:

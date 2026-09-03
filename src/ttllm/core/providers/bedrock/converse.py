@@ -244,10 +244,13 @@ def build_converse_request(request: InternalRequest, llm_model: Any) -> dict[str
     if request.top_k is not None:
         additional_fields["top_k"] = request.top_k
     if request.thinking and request.thinking.enabled:
-        additional_fields["thinking"] = {
-            "type": "enabled",
-            "budget_tokens": request.thinking.budget_tokens,
-        }
+        if request.thinking.type == "adaptive":
+            additional_fields["thinking"] = {"type": "adaptive"}
+        else:
+            additional_fields["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": request.thinking.budget_tokens,
+            }
     if additional_fields:
         params["additionalModelRequestFields"] = additional_fields
 

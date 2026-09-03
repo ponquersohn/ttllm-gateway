@@ -151,6 +151,8 @@ class ToolChoice(BaseModel):
 
 class ThinkingConfig(BaseModel):
     enabled: bool = False
+    # "adaptive" thinking (no fixed budget) vs "enabled" (requires budget_tokens).
+    type: Literal["enabled", "adaptive"] = "enabled"
     budget_tokens: int | None = None
 
 
