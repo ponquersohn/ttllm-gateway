@@ -894,3 +894,73 @@ class TestCachePoint:
         assert not _has_cache_point(result["system"])
         assert not _has_cache_point(result["toolConfig"]["tools"])
         assert not _has_cache_point(result["messages"][0]["content"])
+
+
+class TestToolResultCacheControl:
+    """Agentic clients (Claude Code) mark the LAST tool_result of each turn with
+    cache_control. The marker must survive the wire schema and the adapter and become a
+    sibling cachePoint after the toolResult block, or the conversation never caches."""
+
+    def _wire(self):
+        return {
+            "model": "claude-sonnet",
+            "max_tokens": 16,
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                              "content": [{"type": "text", "text": "big output"}],
+                                              "cache_control": {"type": "ephemeral"}}]},
+            ],
+        }
+
+    def test_tool_result_cache_control_emits_cache_point(self):
+        from ttllm.schemas.anthropic import MessagesRequest
+        from ttllm.core.adapters.anthropic import request_to_internal
+        internal = request_to_internal(MessagesRequest.model_validate(self._wire()), _make_model())
+        params = build_converse_request(internal, _make_model())
+        last = params["messages"][-1]["content"]
+        assert "toolResult" in last[0]
+        assert last[1:] == [{"cachePoint": {"type": "default"}}]
+
+    def test_tool_use_cache_control_emits_cache_point(self):
+        from ttllm.schemas.anthropic import MessagesRequest
+        from ttllm.core.adapters.anthropic import request_to_internal
+        wire = self._wire()
+        wire["messages"][1]["content"][0]["cache_control"] = {"type": "ephemeral"}
+        del wire["messages"][2]["content"][0]["cache_control"]
+        internal = request_to_internal(MessagesRequest.model_validate(wire), _make_model())
+        params = build_converse_request(internal, _make_model())
+        assert params["messages"][1]["content"][1:] == [{"cachePoint": {"type": "default"}}]
+
+    def test_tool_result_inner_text_cache_control_emits_cache_point(self):
+        """Marker on the tool_result's last inner text block, not on the tool_result
+        block itself -- must still promote to a sibling cachePoint."""
+        from ttllm.schemas.anthropic import MessagesRequest
+        from ttllm.core.adapters.anthropic import request_to_internal
+        wire = self._wire()
+        wire["messages"][2]["content"][0]["content"][0]["cache_control"] = {"type": "ephemeral"}
+        del wire["messages"][2]["content"][0]["cache_control"]
+        internal = request_to_internal(MessagesRequest.model_validate(wire), _make_model())
+        params = build_converse_request(internal, _make_model())
+        last = params["messages"][-1]["content"]
+        assert "toolResult" in last[0]
+        assert last[1:] == [{"cachePoint": {"type": "default"}}]
+
+    def test_tool_result_inner_image_cache_control_emits_cache_point(self):
+        """Same as above, but the tool_result's last inner block is an image (e.g. a
+        screenshot from a computer-use/browser tool) rather than text."""
+        from ttllm.schemas.anthropic import MessagesRequest
+        from ttllm.core.adapters.anthropic import request_to_internal
+        wire = self._wire()
+        wire["messages"][2]["content"][0]["content"] = [{
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="},
+            "cache_control": {"type": "ephemeral"},
+        }]
+        del wire["messages"][2]["content"][0]["cache_control"]
+        internal = request_to_internal(MessagesRequest.model_validate(wire), _make_model())
+        params = build_converse_request(internal, _make_model())
+        last = params["messages"][-1]["content"]
+        assert "toolResult" in last[0]
+        assert last[1:] == [{"cachePoint": {"type": "default"}}]

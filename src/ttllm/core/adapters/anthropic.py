@@ -65,7 +65,8 @@ def _tool_result_content_to_parts(content: str | list[TextBlock | ImageBlock]) -
         if isinstance(b, TextBlock):
             parts.append(TextPart(text=b.text, cache_control=bool(b.cache_control)))
         elif isinstance(b, ImageBlock):
-            parts.append(ImagePart(media_type=b.source.media_type, data=b.source.data))
+            parts.append(ImagePart(media_type=b.source.media_type, data=b.source.data,
+                                    cache_control=bool(b.cache_control)))
     return parts
 
 
@@ -73,16 +74,24 @@ def _block_to_part(block: ContentBlock) -> Part:
     if isinstance(block, TextBlock):
         return TextPart(text=block.text, cache_control=bool(block.cache_control))
     if isinstance(block, ImageBlock):
-        return ImagePart(media_type=block.source.media_type, data=block.source.data)
+        return ImagePart(media_type=block.source.media_type, data=block.source.data,
+                         cache_control=bool(block.cache_control))
     if isinstance(block, DocumentBlock):
-        return DocumentPart(media_type=block.source.media_type, data=block.source.data, title=block.title)
+        return DocumentPart(media_type=block.source.media_type, data=block.source.data, title=block.title,
+                            cache_control=bool(block.cache_control))
     if isinstance(block, ToolUseBlock):
-        return ToolCallPart(id=block.id, name=block.name, input=block.input)
+        return ToolCallPart(id=block.id, name=block.name, input=block.input,
+                            cache_control=bool(block.cache_control))
     if isinstance(block, ToolResultBlock):
+        inner = _tool_result_content_to_parts(block.content)
         return ToolResultPart(
             tool_call_id=block.tool_use_id,
-            content=_tool_result_content_to_parts(block.content),
+            content=inner,
             is_error=block.is_error,
+            # A marker on the tool_result itself, or on its last inner text block, both mean
+            # "cache the prefix through this tool result". Converse cannot place a cachePoint
+            # inside toolResult.content, so promote it to the sibling position.
+            cache_control=bool(block.cache_control) or any(p.cache_control for p in inner),
         )
     if isinstance(block, ThinkingBlock):
         return ThinkingPart(text=block.thinking, signature=block.signature)
