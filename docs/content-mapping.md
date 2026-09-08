@@ -58,10 +58,11 @@ are handled, and it decays fast if left to comments scattered across provider fi
 | `ServerToolCallPart` | `id`, `name`, `input` (dict), `cache_control` | A server-side tool invocation (e.g. Anthropic's built-in web_search). |
 | `ServerToolResultPart` | `tool_call_id`, `content` (untyped list), `cache_control` | |
 
-`cache_control` is a plain bool on every part. Only the Anthropic input adapter currently
-sets it to `True` (and only on `TextPart` today, since that's the only Anthropic content
-type with a `cache_control` field), and only the Bedrock provider currently acts on it
-(emitting a `cachePoint`). A provider that doesn't support caching simply ignores the flag
+`cache_control` is a plain bool on every part. The Anthropic input adapter sets it from the
+wire `cache_control` field on text, image, document, tool_use and tool_result blocks (the
+Anthropic API accepts the marker on all of these, plus system and tools; agentic clients such
+as Claude Code place it on the last tool_result of each turn), and only the Bedrock provider
+currently acts on it (emitting a sibling `cachePoint`). A provider that doesn't support caching simply ignores the flag
 — that's a safe no-op, not a lossy drop, unlike the content types below.
 
 **Server-side tool content gets a real `Part`/spec, not a blanket exclusion.** It would be

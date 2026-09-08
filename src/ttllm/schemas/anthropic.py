@@ -25,6 +25,7 @@ class ImageSource(BaseModel):
 class ImageBlock(BaseModel):
     type: Literal["image"] = "image"
     source: ImageSource
+    cache_control: dict[str, Any] | None = None
 
 
 class DocumentSource(BaseModel):
@@ -37,6 +38,7 @@ class DocumentBlock(BaseModel):
     type: Literal["document"] = "document"
     source: DocumentSource
     title: str | None = None
+    cache_control: dict[str, Any] | None = None
 
 
 class ToolUseBlock(BaseModel):
@@ -44,6 +46,7 @@ class ToolUseBlock(BaseModel):
     id: str
     name: str
     input: dict[str, Any]
+    cache_control: dict[str, Any] | None = None
 
 
 class ServerToolUseBlock(BaseModel):
@@ -64,6 +67,7 @@ class ToolResultBlock(BaseModel):
     tool_use_id: str
     content: str | list[TextBlock | ImageBlock] = ""
     is_error: bool = False
+    cache_control: dict[str, Any] | None = None
 
 
 class ThinkingBlock(BaseModel):
