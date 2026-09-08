@@ -65,7 +65,8 @@ def _tool_result_content_to_parts(content: str | list[TextBlock | ImageBlock]) -
         if isinstance(b, TextBlock):
             parts.append(TextPart(text=b.text, cache_control=bool(b.cache_control)))
         elif isinstance(b, ImageBlock):
-            parts.append(ImagePart(media_type=b.source.media_type, data=b.source.data))
+            parts.append(ImagePart(media_type=b.source.media_type, data=b.source.data,
+                                    cache_control=bool(b.cache_control)))
     return parts
 
 
