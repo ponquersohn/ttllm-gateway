@@ -54,7 +54,6 @@ class TestInternalRequest:
             messages=[InternalMessage(role="user", content=[TextPart(text="hi")])],
         )
         assert request.system is None
-        assert request.system_cache_control is False
         assert request.tools == []
         assert request.tool_choice is None
         assert request.thinking is None

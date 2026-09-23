@@ -107,7 +107,7 @@ def to_langchain_messages(request: InternalRequest) -> list[BaseMessage]:
     msgs: list[BaseMessage] = []
 
     if request.system:
-        msgs.append(SystemMessage(content=request.system))
+        msgs.append(SystemMessage(content="\n".join(p.text for p in request.system)))
 
     for msg in request.messages:
         if msg.role == "user":
@@ -247,6 +247,8 @@ def from_langchain_response(
         stop_reason = "tool_use"
     elif finish_reason == "length":
         stop_reason = "max_tokens"
+    elif finish_reason == "content_filter":
+        stop_reason = "refusal"
 
     if not parts:
         parts.append(TextPart(text=""))

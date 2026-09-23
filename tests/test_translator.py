@@ -49,7 +49,7 @@ class TestToLangchainMessages:
         assert msgs[0].content == [{"type": "text", "text": "Hello"}]
 
     def test_with_system_message(self):
-        msgs = to_langchain_messages(_make_request(system="Be helpful."))
+        msgs = to_langchain_messages(_make_request(system=[TextPart(text="Be helpful.")]))
         assert isinstance(msgs[0], SystemMessage)
         assert msgs[0].content == "Be helpful."
 
@@ -279,6 +279,15 @@ class TestFromLangchainResponse:
         assert result.stop_reason == "tool_use"
         assert result.content[0].type == "tool_call"
         assert result.content[0].name == "search"
+
+    def test_content_filter_surfaced_as_refusal(self):
+        """The bug this guards against: a moderation/guardrail cutoff previously
+        stayed "end_turn" (the fallback default), indistinguishable from a normal
+        completion -- the caller had no way to know the model's output was blocked."""
+        response = AIMessage(content="")
+        response.response_metadata = {"finish_reason": "content_filter"}
+        result = from_langchain_response(response)
+        assert result.stop_reason == "refusal"
 
 
 class TestConvertToolChoice:
