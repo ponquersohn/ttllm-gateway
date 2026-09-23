@@ -211,9 +211,11 @@ def build_converse_request(request: InternalRequest, llm_model: Any) -> dict[str
     params["messages"] = [_convert_message_to_bedrock(msg) for msg in request.messages]
 
     if request.system:
-        system_blocks: list[dict[str, Any]] = [{"text": request.system}]
-        if request.system_cache_control:
-            system_blocks.append(_cache_point())
+        system_blocks: list[dict[str, Any]] = []
+        for part in request.system:
+            system_blocks.append({"text": part.text})
+            if part.cache_control:
+                system_blocks.append(_cache_point())
         params["system"] = system_blocks
 
     inference_config: dict[str, Any] = {"maxTokens": request.max_tokens}
@@ -262,8 +264,12 @@ _BEDROCK_STOP_REASON_MAP = {
     "tool_use": "tool_use",
     "max_tokens": "max_tokens",
     "stop_sequence": "stop_sequence",
-    "content_filtered": "end_turn",
-    "guardrail_intervened": "end_turn",
+    # Both indicate a guardrail (content filter or denied topic/word) cut the response
+    # short. Anthropic's own "refusal" stop_reason is the closest honest signal for
+    # this -- folding it into "end_turn" would tell the caller the model finished
+    # normally when it was actually blocked mid-generation.
+    "content_filtered": "refusal",
+    "guardrail_intervened": "refusal",
 }
 
 

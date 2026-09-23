@@ -118,26 +118,34 @@ def _message_system_text(msg: Message) -> str:
     return "\n".join(b.text for b in msg.content if isinstance(b, TextBlock))
 
 
-def _flatten_system(request: MessagesRequest) -> tuple[str | None, bool]:
-    """Returns (flattened system text, system_cache_control). Ordering matches today's
-    Bedrock behavior: top-level ``system`` text first, then each inline
-    ``role="system"`` message's text, in conversation order."""
-    lines: list[str] = []
-    cache_control = False
+def _flatten_system(request: MessagesRequest) -> list[TextPart] | None:
+    """Returns the system content as an ordered list of parts: top-level ``system``
+    blocks first, then each inline ``role="system"`` message's text, in conversation
+    order -- matching today's Bedrock ordering. Each part keeps its own
+    ``cache_control``, so a cache breakpoint on one block never silently swallows
+    whatever comes after it (a trailing uncached top-level block, or a later
+    mid-conversation system message) into the same cached span."""
+    parts: list[TextPart] = []
     if request.system:
         if isinstance(request.system, str):
-            lines.append(request.system)
+            parts.append(TextPart(text=request.system))
         else:
             for block in request.system:
-                lines.append(block.text)
-                if block.cache_control:
-                    cache_control = True
+                parts.append(TextPart(text=block.text, cache_control=bool(block.cache_control)))
     for msg in request.messages:
         if msg.role == "system":
             text = _message_system_text(msg)
             if text:
-                lines.append(text)
-    return ("\n".join(lines) if lines else None), cache_control
+                # A marker on any block within this system message means "cache the
+                # prefix through this message" -- same promotion rule used for
+                # ToolResultPart above, since Converse has no way to place a
+                # cachePoint mid-message.
+                inner_cache_control = (
+                    isinstance(msg.content, list)
+                    and any(isinstance(b, TextBlock) and b.cache_control for b in msg.content)
+                )
+                parts.append(TextPart(text=text, cache_control=bool(inner_cache_control)))
+    return parts or None
 
 
 def _tool_choice_to_internal(tool_choice: Any) -> ToolChoice | None:
@@ -205,7 +213,7 @@ def request_to_internal(request: MessagesRequest, llm_model: Any) -> InternalReq
     provider-layer decision (``ServerToolError``, raised from provider translation code),
     not something this adapter should presume.
     """
-    system, system_cache_control = _flatten_system(request)
+    system = _flatten_system(request)
 
     messages = [
         InternalMessage(role=msg.role, content=_content_to_parts(msg.content))
@@ -217,7 +225,6 @@ def request_to_internal(request: MessagesRequest, llm_model: Any) -> InternalReq
         provider_model_id=llm_model.provider_model_id,
         messages=messages,
         system=system,
-        system_cache_control=system_cache_control,
         max_tokens=request.max_tokens,
         temperature=request.temperature,
         top_p=request.top_p,

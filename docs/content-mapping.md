@@ -78,7 +78,9 @@ tools" below.
 
 - `InternalRequest`: `provider_model_id`, `messages: list[InternalMessage]` (role is only
   `"user"` or `"assistant"` — a wire format's own system-role quirks are flattened away by
-  its input adapter), `system: str | None`, `system_cache_control`, generation params,
+  its input adapter), `system: list[TextPart] | None` (each part keeps its own
+  `cache_control`, so a cache breakpoint on one block doesn't silently absorb whatever comes
+  after it), generation params,
   `tools: list[ToolSpec]`, `server_tools: list[ServerToolSpec]` (passthrough `type`/`name`/
   `config`, since each wire format's server tools are their own arbitrary contract), `tool_choice`,
   `thinking`.
@@ -101,7 +103,7 @@ tools" below.
 | `ToolResultBlock` (`content: str \| list[TextBlock \| ImageBlock]`) | `ToolResultPart` (`content` always normalized to `list[TextPart \| ImagePart]`) |
 | `ThinkingBlock` | `ThinkingPart` |
 | `RedactedThinkingBlock` | `RedactedThinkingPart` |
-| Top-level `system` + mid-conversation `role="system"` messages | Flattened into a single `InternalRequest.system: str` (top-level text first, then each inline system message's text, newline-joined) |
+| Top-level `system` + mid-conversation `role="system"` messages | Flattened into `InternalRequest.system: list[TextPart]` — one part per top-level system block (preserving its own `cache_control`), then one part per inline system message, in conversation order. Unlike a bare string, this keeps each block's cache boundary intact instead of merging everything (cached prefix and any uncached trailing content) into one span. |
 | `cache_control: dict \| None` | `cache_control: bool` |
 | `ToolChoiceAuto/Any/Tool/None` | `ToolChoice(mode=..., tool_name=...)` |
 | `ServerToolUseBlock` | `ServerToolCallPart` |
@@ -146,6 +148,12 @@ below are deliberate exceptions because there is no real content being lost.
 | `TextPart`, `ImagePart`, `DocumentPart`, `ToolCallPart`, `ToolResultPart`, `ThinkingPart` | Full native support (Bedrock Converse has direct equivalents for all of these). |
 | `RedactedThinkingPart` | **Silent drop.** Bedrock has no equivalent, and there's nothing to emulate — the payload is opaque even to Anthropic. This is the one deliberate exception to "always emulate or error." |
 | `ServerToolCallPart`, `ServerToolResultPart`, non-empty `server_tools` | **Error** (`ServerToolError`, mapped to HTTP 501 `not_implemented_error`). Bedrock Converse has no mechanism to proxy server-side tools. |
+
+Bedrock's `stopReason` values `guardrail_intervened` and `content_filtered` (a target-model
+guardrail blocked or altered the response) both map to `InternalResult.stop_reason =
+"refusal"`, not `"end_turn"` — folding them into `"end_turn"` would tell the caller the model
+finished normally when a guardrail actually cut it short. The OpenAI-compatible LangChain
+provider applies the same mapping for `finish_reason == "content_filter"`.
 
 ### OpenAI-compatible via LangChain (`core/providers/langchain/translation.py`)
 

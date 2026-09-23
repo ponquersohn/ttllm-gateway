@@ -119,21 +119,39 @@ class TestRequestToInternal:
 
     def test_system_string(self):
         internal = request_to_internal(_make_request(system="Be helpful."), _make_model())
-        assert internal.system == "Be helpful."
-        assert internal.system_cache_control is False
+        assert internal.system == [TextPart(text="Be helpful.")]
 
     def test_system_as_text_blocks(self):
         internal = request_to_internal(
             _make_request(system=[TextBlock(text="Part 1"), TextBlock(text="Part 2")]), _make_model()
         )
-        assert internal.system == "Part 1\nPart 2"
+        assert internal.system == [TextPart(text="Part 1"), TextPart(text="Part 2")]
 
     def test_system_cache_control(self):
         internal = request_to_internal(
             _make_request(system=[TextBlock(text="prefix", cache_control={"type": "ephemeral"})]),
             _make_model(),
         )
-        assert internal.system_cache_control is True
+        assert internal.system == [TextPart(text="prefix", cache_control=True)]
+
+    def test_system_cache_boundary_preserved_across_blocks(self):
+        """The bug this guards against: a cached top-level block followed by an
+        uncached one must stay two separate parts, not get merged into a single
+        span -- merging would make Bedrock cache (and re-cache, on every request)
+        whatever dynamic content follows the cache_control marker."""
+        internal = request_to_internal(
+            _make_request(
+                system=[
+                    TextBlock(text="static instructions", cache_control={"type": "ephemeral"}),
+                    TextBlock(text="dynamic per-request tail"),
+                ]
+            ),
+            _make_model(),
+        )
+        assert internal.system == [
+            TextPart(text="static instructions", cache_control=True),
+            TextPart(text="dynamic per-request tail", cache_control=False),
+        ]
 
     def test_mid_conversation_system_lifted(self):
         request = _make_request(
@@ -144,7 +162,7 @@ class TestRequestToInternal:
             ]
         )
         internal = request_to_internal(request, _make_model())
-        assert internal.system == "Terse mode enabled."
+        assert internal.system == [TextPart(text="Terse mode enabled.")]
         assert [m.role for m in internal.messages] == ["user", "user"]
 
     def test_mid_conversation_system_appended_after_top_level(self):
@@ -156,7 +174,27 @@ class TestRequestToInternal:
             ],
         )
         internal = request_to_internal(request, _make_model())
-        assert internal.system == "Base prompt.\nSwitch to JSON output."
+        assert internal.system == [
+            TextPart(text="Base prompt."),
+            TextPart(text="Switch to JSON output."),
+        ]
+
+    def test_mid_conversation_system_stays_uncached_after_cached_top_level(self):
+        """A cached top-level system prompt followed by a later mid-conversation
+        system message (typically per-turn dynamic content) must not be folded into
+        the same cached span as the top-level block."""
+        request = _make_request(
+            system=[TextBlock(text="Base prompt.", cache_control={"type": "ephemeral"})],
+            messages=[
+                Message(role="user", content="Hi"),
+                Message(role="system", content="Switch to JSON output."),
+            ],
+        )
+        internal = request_to_internal(request, _make_model())
+        assert internal.system == [
+            TextPart(text="Base prompt.", cache_control=True),
+            TextPart(text="Switch to JSON output.", cache_control=False),
+        ]
 
     def test_system_message_block_content_flattened(self):
         request = _make_request(
@@ -166,7 +204,7 @@ class TestRequestToInternal:
             ]
         )
         internal = request_to_internal(request, _make_model())
-        assert internal.system == "Line A\nLine B"
+        assert internal.system == [TextPart(text="Line A\nLine B")]
 
     def test_tool_result_str_content_normalized_to_list(self):
         request = _make_request(

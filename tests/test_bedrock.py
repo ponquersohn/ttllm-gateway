@@ -63,19 +63,37 @@ class TestBuildConverseRequest:
         assert result["inferenceConfig"]["maxTokens"] == 1024
 
     def test_system_message(self):
-        request = _make_request(system="Be helpful.")
+        request = _make_request(system=[TextPart(text="Be helpful.")])
         model = _make_model()
         result = build_converse_request(request, model)
 
         assert result["system"] == [{"text": "Be helpful."}]
 
     def test_system_cache_control(self):
-        request = _make_request(system="Big shared prefix.", system_cache_control=True)
+        request = _make_request(system=[TextPart(text="Big shared prefix.", cache_control=True)])
         result = build_converse_request(request, _make_model())
 
         assert result["system"] == [
             {"text": "Big shared prefix."},
             {"cachePoint": {"type": "default"}},
+        ]
+
+    def test_system_cache_boundary_between_cached_and_uncached_parts(self):
+        """The bug this guards against: the cache point must land right after the
+        cached part, not after everything -- otherwise a trailing dynamic tail gets
+        folded into the same cached span and never hits cache twice in a row."""
+        request = _make_request(
+            system=[
+                TextPart(text="static instructions", cache_control=True),
+                TextPart(text="dynamic per-request tail"),
+            ]
+        )
+        result = build_converse_request(request, _make_model())
+
+        assert result["system"] == [
+            {"text": "static instructions"},
+            {"cachePoint": {"type": "default"}},
+            {"text": "dynamic per-request tail"},
         ]
 
     def test_no_system_omits_key(self):
@@ -405,6 +423,20 @@ class TestParseConverseResponse:
 
         assert result.stop_reason == "max_tokens"
 
+    @pytest.mark.parametrize("bedrock_reason", ["guardrail_intervened", "content_filtered"])
+    def test_guardrail_stop_reason_surfaced_as_refusal(self, bedrock_reason):
+        """The bug this guards against: a guardrail intervention was previously mapped
+        to "end_turn", indistinguishable from a normal completion -- the caller had no
+        way to know the model's output was blocked/altered by a guardrail."""
+        response = {
+            "output": {"message": {"content": [{"text": "..."}]}},
+            "stopReason": bedrock_reason,
+            "usage": {"inputTokens": 10, "outputTokens": 4},
+        }
+        result = parse_converse_response(response)
+
+        assert result.stop_reason == "refusal"
+
     def test_empty_content_gets_empty_text_block(self):
         response = {
             "output": {"message": {"content": []}},
@@ -632,6 +664,30 @@ class TestStreamConverseChunks:
         assert stop.usage.output_tokens == 40
         assert stop.usage.cache_read_tokens == 50
         assert stop.usage.cache_write_tokens == 30
+
+    @pytest.mark.asyncio
+    async def test_guardrail_stop_reason_surfaced_as_refusal(self):
+        """Same bug as the non-streaming path: a guardrail-triggered stream must not
+        report "end_turn", or the caller can't tell the response was intervened on."""
+        from ttllm.core.providers.bedrock.converse import stream_converse_chunks
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Hi"}}},
+            {"messageStop": {"stopReason": "guardrail_intervened"}},
+            {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 4}}},
+        ]
+        model = _make_model()
+
+        with patch("ttllm.core.providers.bedrock.converse.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+
+            collected = [c async for c in stream_converse_chunks(_make_request(), model, uuid.uuid4())]
+
+        stop = next(c for c in collected if c.kind == ChunkKind.MESSAGE_STOP)
+        assert stop.stop_reason == "refusal"
 
     @pytest.mark.asyncio
     async def test_state_populated_through_gateway(self):
@@ -882,7 +938,7 @@ class TestCachePoint:
     def test_no_cache_control_emits_no_cache_point(self):
         tools = [ToolSpec(name="search", input_schema={"type": "object", "properties": {}})]
         request = _make_request(
-            system="prefix",
+            system=[TextPart(text="prefix")],
             tools=tools,
             messages=[InternalMessage(role="user", content=[TextPart(text="hello")])],
         )

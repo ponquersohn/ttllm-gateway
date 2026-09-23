@@ -159,8 +159,7 @@ class ThinkingConfig(BaseModel):
 class InternalRequest(BaseModel):
     provider_model_id: str
     messages: list[InternalMessage]
-    system: str | None = None
-    system_cache_control: bool = False
+    system: list[TextPart] | None = None
     max_tokens: int
     temperature: float | None = None
     top_p: float | None = None
@@ -190,7 +189,7 @@ class InternalResult(BaseModel):
     """
 
     content: list[Part]
-    stop_reason: Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"]
+    stop_reason: Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "refusal"]
     usage: InternalUsage
 
 
