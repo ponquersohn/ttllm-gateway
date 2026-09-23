@@ -47,6 +47,7 @@ async def encode_anthropic_sse(
 
     open_blocks: set[int] = set()
     stop_reason = "end_turn"
+    safeguard_results: list[dict[str, Any]] | None = None
     usage_dict: dict[str, Any] = {
         "input_tokens": 0,
         "output_tokens": 0,
@@ -98,6 +99,7 @@ async def encode_anthropic_sse(
 
         elif chunk.kind == ChunkKind.MESSAGE_STOP:
             stop_reason = chunk.stop_reason or "end_turn"
+            safeguard_results = chunk.safeguard_results
             if chunk.usage:
                 usage_dict = {
                     "input_tokens": chunk.usage.input_tokens,
@@ -116,9 +118,13 @@ async def encode_anthropic_sse(
     for idx in sorted(open_blocks):
         yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": idx})
 
+    delta: dict[str, Any] = {"type": "message_delta", "stop_reason": stop_reason, "stop_sequence": None}
+    if safeguard_results is not None:
+        # Anthropic carries these on message_delta, keyed by the tool_use ids already sent.
+        delta["safeguard_results"] = safeguard_results
     yield _sse_event("message_delta", {
         "type": "message_delta",
-        "delta": {"type": "message_delta", "stop_reason": stop_reason, "stop_sequence": None},
+        "delta": delta,
         "usage": usage_dict,
     })
     yield _sse_event("message_stop", {"type": "message_stop"})

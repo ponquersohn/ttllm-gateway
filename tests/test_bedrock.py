@@ -1020,3 +1020,112 @@ class TestToolResultCacheControl:
         last = params["messages"][-1]["content"]
         assert "toolResult" in last[0]
         assert last[1:] == [{"cachePoint": {"type": "default"}}]
+
+
+_SAFEGUARDS = [{"type": "dangerous_tool_use", "classifier_context": {"v": 1, "permission_mode": "auto"}}]
+
+
+def _safeguard_results(tool_uses):
+    return [{"type": "dangerous_tool_use", "status": {"type": "available", "tool_uses": tool_uses}}]
+
+
+class TestSafeguards:
+    """Anthropic ``safeguards`` (Claude Code auto mode's server-side classifier) are
+    forwarded through Converse's additional fields; results come back keyed by the model's
+    native tool-use ids, which Converse rewrites, so they're rekeyed positionally."""
+
+    def test_forwarded_with_beta_and_response_path(self):
+        params = build_converse_request(_make_request(safeguards=_SAFEGUARDS), _make_model())
+        assert params["additionalModelRequestFields"]["safeguards"] == _SAFEGUARDS
+        assert params["additionalModelRequestFields"]["anthropic_beta"] == ["dangerous-tool-use-2026-09-03"]
+        assert params["additionalModelResponseFieldPaths"] == ["/safeguard_results"]
+
+    def test_stream_uses_delta_response_path(self):
+        params = build_converse_request(_make_request(safeguards=_SAFEGUARDS), _make_model(), stream=True)
+        assert params["additionalModelResponseFieldPaths"] == ["/delta/safeguard_results"]
+
+    def test_absent_safeguards_add_nothing(self):
+        params = build_converse_request(_make_request(), _make_model())
+        assert "additionalModelRequestFields" not in params
+        assert "additionalModelResponseFieldPaths" not in params
+
+    def test_results_rekeyed_to_converse_tool_ids_in_order(self):
+        response = {
+            "output": {"message": {"content": [
+                {"toolUse": {"toolUseId": "tooluse_A", "name": "Bash", "input": {"command": "ls"}}},
+                {"toolUse": {"toolUseId": "tooluse_B", "name": "Bash", "input": {"command": "rm -rf /var/log"}}},
+            ]}},
+            "stopReason": "tool_use",
+            "usage": {"inputTokens": 1, "outputTokens": 1},
+            "additionalModelResponseFields": {"safeguard_results": _safeguard_results({
+                "toolu_bdrk_1": {"type": "evaluated", "outcome": "not_flagged"},
+                "toolu_bdrk_2": {"type": "evaluated", "outcome": "flagged", "explanation": "[Logging/Audit Tampering]"},
+            })},
+        }
+        result = parse_converse_response(response)
+        tool_uses = result.safeguard_results[0]["status"]["tool_uses"]
+        assert list(tool_uses) == ["tooluse_A", "tooluse_B"]
+        assert tool_uses["tooluse_B"]["outcome"] == "flagged"
+        assert result.safeguard_results[0]["type"] == "dangerous_tool_use"
+
+    def test_count_mismatch_drops_verdicts_rather_than_guessing(self):
+        response = {
+            "output": {"message": {"content": [
+                {"toolUse": {"toolUseId": "tooluse_A", "name": "Bash", "input": {}}},
+            ]}},
+            "stopReason": "tool_use",
+            "usage": {"inputTokens": 1, "outputTokens": 1},
+            "additionalModelResponseFields": {"safeguard_results": _safeguard_results({
+                "toolu_bdrk_1": {"type": "evaluated", "outcome": "not_flagged"},
+                "toolu_bdrk_2": {"type": "evaluated", "outcome": "flagged"},
+            })},
+        }
+        result = parse_converse_response(response)
+        assert result.safeguard_results[0]["status"]["tool_uses"] == {}
+        assert result.safeguard_results[0]["status"]["type"] == "available"
+
+    def test_no_results_when_not_requested(self):
+        response = {
+            "output": {"message": {"content": [{"text": "hi"}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1, "outputTokens": 1},
+        }
+        assert parse_converse_response(response).safeguard_results is None
+
+    @pytest.mark.asyncio
+    async def test_stream_results_on_message_stop_and_state(self):
+        from ttllm.core.providers.bedrock.converse import stream_converse_chunks
+        from ttllm.core.providers.bedrock.provider import BedrockState
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockStart": {"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "tooluse_A", "name": "Bash"}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": '{"command": "ls"}'}}}},
+            {"contentBlockStop": {"contentBlockIndex": 0}},
+            {"messageStop": {"stopReason": "tool_use", "additionalModelResponseFields": {"delta": {
+                "safeguard_results": _safeguard_results({"toolu_bdrk_1": {"type": "evaluated", "outcome": "not_flagged"}}),
+            }}}},
+            {"metadata": {"usage": {"inputTokens": 5, "outputTokens": 3}}},
+        ]
+        model = _make_model(
+            input_cost_per_1k=0, output_cost_per_1k=0, cache_read_cost_per_1k=0, cache_write_cost_per_1k=0
+        )
+        state = BedrockState(model, uuid.uuid4())
+
+        with patch("ttllm.core.providers.bedrock.converse.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+
+            collected = [
+                c async for c in stream_converse_chunks(
+                    _make_request(safeguards=_SAFEGUARDS), model, uuid.uuid4(), state=state
+                )
+            ]
+            sent = mock_client.converse_stream.call_args.kwargs
+
+        assert sent["additionalModelResponseFieldPaths"] == ["/delta/safeguard_results"]
+        stop = next(c for c in collected if c.kind == ChunkKind.MESSAGE_STOP)
+        assert list(stop.safeguard_results[0]["status"]["tool_uses"]) == ["tooluse_A"]
+        assert state.get_response().safeguard_results == stop.safeguard_results
+        assert state.get_metadata()["safeguard_results"] == stop.safeguard_results

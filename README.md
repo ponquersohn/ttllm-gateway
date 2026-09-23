@@ -17,6 +17,7 @@ LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing 
 | Token tracking & cost | Yes | Yes |
 | Cache token reporting | Yes | No |
 | Server-side tools | 501 (not proxied) | 501 (not proxied) |
+| `safeguards` (Claude Code auto-mode server-side classifier) | Yes² | Dropped (client-side classifier used) |
 
 ¹ Requests are translated through a provider-agnostic internal representation (see
 Architecture Note below); when the OpenAI-compatible provider can't faithfully represent a
@@ -25,6 +26,9 @@ becomes plain text; an image inside a tool result is passed through as multimoda
 this used to crash) or returns an explicit 400 rather than silently dropping it (document
 inputs, since the model would otherwise answer as if it had read an attachment it never
 saw). See `docs/content-mapping.md` for the full per-content-type policy.
+
+² Forwarded through Converse. Results are rekeyed to Converse's tool-use ids by position,
+because Converse rewrites the ids. See "Safeguards" in `docs/content-mapping.md`.
 
 ### Architecture Note
 

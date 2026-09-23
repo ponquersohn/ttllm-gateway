@@ -120,3 +120,23 @@ class TestEncodeAnthropicSse:
         collected = await _collect([])
         types = [_parse_sse(e)[0] for e in collected]
         assert types == ["message_start", "ping", "message_delta", "message_stop"]
+
+
+class TestSafeguardResults:
+    @pytest.mark.asyncio
+    async def test_results_on_message_delta(self):
+        results = [{"type": "dangerous_tool_use", "status": {"type": "available", "tool_uses": {"tu_1": {"type": "evaluated", "outcome": "not_flagged"}}}}]
+        collected = await _collect([
+            InternalChunk(kind=ChunkKind.MESSAGE_STOP, stop_reason="tool_use",
+                          usage=InternalUsage(input_tokens=1, output_tokens=1), safeguard_results=results),
+        ])
+        delta = _parse_sse(next(e for e in collected if e.startswith("event: message_delta")))[1]["delta"]
+        assert delta["safeguard_results"] == results
+
+    @pytest.mark.asyncio
+    async def test_absent_results_not_emitted(self):
+        collected = await _collect([
+            InternalChunk(kind=ChunkKind.MESSAGE_STOP, stop_reason="end_turn", usage=InternalUsage(input_tokens=1, output_tokens=1)),
+        ])
+        delta = _parse_sse(next(e for e in collected if e.startswith("event: message_delta")))[1]["delta"]
+        assert "safeguard_results" not in delta

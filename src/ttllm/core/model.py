@@ -169,6 +169,12 @@ class InternalRequest(BaseModel):
     server_tools: list[ServerToolSpec] = []
     tool_choice: ToolChoice | None = None
     thinking: ThinkingConfig | None = None
+    # Server-side safety checks the caller asks the model backend to run alongside this
+    # request (Anthropic's ``safeguards``, e.g. Claude Code auto mode's
+    # ``dangerous_tool_use`` classifier). Opaque passthrough -- each entry's shape is the
+    # backend's own contract, like ``ServerToolSpec.config``. Whether a provider can
+    # forward them is a provider decision; see ``docs/content-mapping.md``.
+    safeguards: list[dict[str, Any]] = []
 
 
 # --- Result (non-streaming) ---
@@ -191,6 +197,10 @@ class InternalResult(BaseModel):
     content: list[Part]
     stop_reason: Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "refusal"]
     usage: InternalUsage
+    # Outcome of ``InternalRequest.safeguards``, opaque like the request side. ``None``
+    # means the provider didn't run (or couldn't report) them -- distinct from an empty
+    # list. Any tool-call ids inside must match this result's ``ToolCallPart.id``s.
+    safeguard_results: list[dict[str, Any]] | None = None
 
 
 # --- Streaming ---
@@ -216,4 +226,6 @@ class InternalChunk(BaseModel):
     signature: str | None = None
     stop_reason: str | None = None
     usage: InternalUsage | None = None
+    # MESSAGE_STOP only; see ``InternalResult.safeguard_results``.
+    safeguard_results: list[dict[str, Any]] | None = None
     error_message: str | None = None
