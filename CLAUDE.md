@@ -3,6 +3,7 @@
 ## Important Rules
 - **Keep README.md in sync**: When changing configuration options, CLI commands, Docker setup, release process, deployment, or any other topic covered in README.md, update the README to reflect those changes.
 - **Keep docs/content-mapping.md in sync**: When changing how a content type is represented internally, added/removed, or handled differently by a provider or input adapter (support/emulate/error/drop), update that file's mapping tables.
+- **Check `.localconfig`**: a git-ignored, local-only file at the repo root holding operational knowledge about live sandbox deployments used for testing/analysis against this repo (URLs, admin/login notes, AWS/Bedrock config conventions actually used there, current model catalog, pricing lookup gotchas). Read it before investigating a live sandbox from scratch, and append newly-learned operational details to it as they're discovered so future sessions don't have to re-derive them.
 
 ## Project Overview
 LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing requests through a provider-agnostic internal representation to any supported provider (Bedrock via direct boto3, OpenAI-compatible via LangChain). Tracks tokens, costs, and maintains audit trails. Supports user management with per-user model access control.

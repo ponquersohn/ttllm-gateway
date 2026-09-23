@@ -49,6 +49,7 @@ htmlcov/
 
 # Config local overrides
 local.config.yaml
+.localconfig
 
 # Environments / secrets
 .env
