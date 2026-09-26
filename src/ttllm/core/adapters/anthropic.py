@@ -234,6 +234,7 @@ def request_to_internal(request: MessagesRequest, llm_model: Any) -> InternalReq
         server_tools=_server_tools_to_internal(request.tools),
         tool_choice=_tool_choice_to_internal(request.tool_choice),
         thinking=_thinking_to_internal(request.thinking),
+        safeguards=request.safeguards or [],
     )
 
 
@@ -278,4 +279,5 @@ def result_to_response(result: InternalResult, model_name: str, request_id: uuid
         model=model_name,
         stop_reason=result.stop_reason,
         usage=usage,
+        safeguard_results=result.safeguard_results,
     )

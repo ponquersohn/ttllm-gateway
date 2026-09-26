@@ -380,3 +380,28 @@ class TestResultToResponse:
         response = result_to_response(result, "claude-sonnet", uuid.uuid4())
         assert response.content[0].type == "tool_use"
         assert response.content[0].id == "tu_1"
+
+
+class TestSafeguards:
+    _SAFEGUARDS = [{"type": "dangerous_tool_use", "classifier_context": {"v": 1}}]
+
+    def test_request_safeguards_carried_verbatim(self):
+        internal = request_to_internal(_make_request(safeguards=self._SAFEGUARDS), _make_model())
+        assert internal.safeguards == self._SAFEGUARDS
+
+    def test_request_without_safeguards(self):
+        assert request_to_internal(_make_request(), _make_model()).safeguards == []
+
+    def test_wire_request_keeps_safeguards_field(self):
+        wire = {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}], "safeguards": self._SAFEGUARDS}
+        assert MessagesRequest.model_validate(wire).safeguards == self._SAFEGUARDS
+
+    def test_results_on_response(self):
+        results = [{"type": "dangerous_tool_use", "status": {"type": "available", "tool_uses": {}}}]
+        result = InternalResult(
+            content=[TextPart(text="ok")],
+            stop_reason="end_turn",
+            usage=InternalUsage(input_tokens=1, output_tokens=1),
+            safeguard_results=results,
+        )
+        assert result_to_response(result, "claude-sonnet", uuid.uuid4()).safeguard_results == results

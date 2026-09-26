@@ -177,6 +177,10 @@ class MessagesRequest(BaseModel):
     tool_choice: ToolChoice | None = None
     thinking: dict[str, Any] | None = None
     service_tier: str | None = None
+    # Server-side safety checks (beta dangerous-tool-use-2026-09-03), sent by Claude
+    # Code in auto mode. Opaque: the entries are forwarded as-is to providers that
+    # support them.
+    safeguards: list[dict[str, Any]] | None = None
 
 
 class CacheCreation(BaseModel):
@@ -215,6 +219,9 @@ class MessagesResponse(BaseModel):
     stop_sequence: str | None = None
     stop_details: StopDetails | None = None
     usage: Usage
+    # Present only when the request carried ``safeguards`` and the provider ran them;
+    # left out of the wire response otherwise (see ``result_to_response``).
+    safeguard_results: list[dict[str, Any]] | None = None
 
 
 # --- Streaming events ---

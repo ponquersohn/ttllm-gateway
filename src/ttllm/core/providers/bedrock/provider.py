@@ -35,6 +35,7 @@ class BedrockState(ProviderState):
         self.raw_usage: dict[str, Any] = {}
         self.stop_reason = "end_turn"
         self.content_parts: list[Part] = []
+        self.safeguard_results: list[dict[str, Any]] | None = None
         self._start = time.monotonic()
         self.latency_ms = 0
         self.error: BaseException | None = None
@@ -62,6 +63,9 @@ class BedrockState(ProviderState):
             "raw": self.raw_usage,
             "stop_reason": self.stop_reason,
             "latency_ms": self.latency_ms,
+            # Kept for the audit trail: a "flagged" verdict here is why a client blocked
+            # a tool call.
+            "safeguard_results": self.safeguard_results,
             "cost": {
                 "total": str(self.get_cost()),
                 "components": {k: str(v) for k, v in components.items()},
@@ -85,6 +89,7 @@ class BedrockState(ProviderState):
                 cache_read_tokens=self.cache_read_tokens,
                 cache_write_tokens=self.cache_write_tokens,
             ),
+            safeguard_results=self.safeguard_results,
         )
 
 
@@ -104,6 +109,7 @@ class BedrockProvider(BaseProvider):
         state.raw_usage = raw.get("usage", {})
         state.stop_reason = result.stop_reason
         state.content_parts = list(result.content)
+        state.safeguard_results = result.safeguard_results
         state.mark_finished()
         return state
 

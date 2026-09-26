@@ -229,7 +229,9 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
         state = await gateway.invoke(internal_request, llm_model, request_id)
         response = anthropic_adapter.result_to_response(state.get_response(), llm_model.name, request_id)
         await _finalize(state, body, llm_model, user, db, request_id, metadata, response=response)
-        return JSONResponse(content=response.model_dump())
+        # safeguard_results only appears when safeguards actually ran, as on Anthropic's API.
+        exclude = {"safeguard_results"} if response.safeguard_results is None else None
+        return JSONResponse(content=response.model_dump(exclude=exclude))
 
     except Exception as exc:
         status, error_type, message = await _log_error(

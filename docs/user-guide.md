@@ -286,6 +286,8 @@ claude
 
 Claude Code will route all requests through the gateway using the models available to your account.
 
+> **Auto mode:** on Bedrock-backed models, the gateway forwards Claude Code's auto-mode `safeguards`, so its safety classifier runs on the server and isn't billed as separate classifier requests. On OpenAI-compatible models, Claude Code shows a notice that the session "isn't eligible" and keeps running its own, billed classifier requests. Auto mode works either way. To turn the notice off on such models, set `CLAUDE_CODE_AUTO_MODE_SERVER=0`.
+
 > **Model discovery:** set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` to make Claude Code's `/model` picker query the gateway's `GET /anthropic/v1/models` endpoint and list the models assigned to your account. Without it, Claude Code shows only its built-in model menu (gateway model discovery is gated off for non-first-party hosts), though you can still target any assigned model with `claude --model <name>`.
 
 ### Model override variables

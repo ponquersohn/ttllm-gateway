@@ -83,14 +83,15 @@ tools" below.
   after it), generation params,
   `tools: list[ToolSpec]`, `server_tools: list[ServerToolSpec]` (passthrough `type`/`name`/
   `config`, since each wire format's server tools are their own arbitrary contract), `tool_choice`,
-  `thinking`.
-- `InternalResult`: `content: list[Part]`, `stop_reason`, `usage`. No `id`/`model` fields —
+  `thinking`, `safeguards: list[dict]` (opaque passthrough — see "Safeguards" below).
+- `InternalResult`: `content: list[Part]`, `stop_reason`, `usage`, `safeguard_results:
+  list[dict] | None` (`None` = not run/not reported). No `id`/`model` fields —
   those are wire-envelope concerns, synthesized only by the input adapter that builds the
   final response (e.g. `core/adapters/anthropic.py::result_to_response`).
 - `InternalChunk`: one item of a provider's streamed output — `BLOCK_START` (carries an
   empty-shell `Part` so a streaming encoder knows the block's type), `TEXT_DELTA`,
   `TOOL_ARGS_DELTA`, `THINKING_DELTA`, `SIGNATURE_DELTA`, `BLOCK_STOP`, `MESSAGE_STOP`
-  (carries final `stop_reason` + `usage`), `ERROR`.
+  (carries final `stop_reason` + `usage` + `safeguard_results`), `ERROR`.
 
 ## Anthropic input adapter (`core/adapters/anthropic.py`, `core/adapters/anthropic_stream.py`)
 
@@ -109,6 +110,8 @@ tools" below.
 | `ServerToolUseBlock` | `ServerToolCallPart` |
 | `WebSearchToolResultBlock` | `ServerToolResultPart` |
 | `ServerToolDefinition` (in `tools`) | `ServerToolSpec` (`InternalRequest.server_tools`, kept separate from `InternalRequest.tools`) |
+| Request `safeguards` | `InternalRequest.safeguards` (verbatim) |
+| Response `safeguard_results` (non-streaming: top level, omitted when `None`; streaming: on `message_delta.delta`) | `InternalResult.safeguard_results` / `MESSAGE_STOP` chunk's `safeguard_results` |
 
 `core/adapters/anthropic_stream.py::encode_anthropic_sse` is the only place that constructs
 an Anthropic SSE frame (`message_start` -> `ping` -> repeated
@@ -131,6 +134,29 @@ tools — but that's a fact about Bedrock and LangChain/OpenAI specifically, not
 gateway should hard-code above the provider layer. A well-behaved client (e.g. Claude Code)
 already knows not to send server tools against a non-Anthropic-native backend, so in
 practice this is defense-in-depth rather than something clients are expected to trigger.
+
+### Safeguards
+
+`safeguards` (beta `dangerous-tool-use-2026-09-03`) asks the model backend to run
+server-side safety checks alongside the request — Claude Code sends it in auto mode so its
+`dangerous_tool_use` classifier runs on the server, where it isn't billed, instead of as
+separate client-side classifier requests, which are. The backend answers with
+`safeguard_results`, which holds a verdict per `tool_use` id from the same response. If a
+gateway drops either field, Claude Code falls back to its own (billed) classifier requests
+and shows the "this session isn't eligible" notice naming the gateway. Both fields are
+opaque in the internal model: their shape belongs to the backend, not to this gateway.
+
+| Provider | Handling |
+|---|---|
+| Bedrock (Converse) | **Supported, with an ID-rekeying workaround.** `safeguards` plus `anthropic_beta: ["dangerous-tool-use-2026-09-03"]` go in `additionalModelRequestFields`. The gateway adds the beta itself because it doesn't forward the caller's `anthropic-beta` header, and Bedrock rejects the field without it. Results come back through `additionalModelResponseFieldPaths`: `/safeguard_results` on `converse()`, and `/delta/safeguard_results` on `converse_stream()`, where they arrive on `messageStop`. **Caveat:** Converse rewrites tool-use ids (`tooluse_…`), but the results are keyed by the model's native ids (`toolu_bdrk_…`), which Converse never exposes. `_remap_safeguard_results` rekeys them by position: native entries follow content order, which was verified against InvokeModel. If the counts disagree, `tool_uses` is emptied rather than guessed, so the client checks those calls itself. |
+| OpenAI-compatible (LangChain) | **Silent drop.** OpenAI-style backends have no equivalent. No `safeguard_results` are returned, so Claude Code falls back to client-side classifier requests (billed, as before). This is a billing difference, not lost content. |
+
+**Revisit when:** (a) TTLLM gains an Anthropic-native outbound path (Bedrock InvokeModel or
+the Anthropic API directly). That path should forward `safeguards` / `safeguard_results`
+verbatim, together with the caller's `anthropic-beta` header, and skip the positional
+rekeying entirely. (b) Converse starts preserving native tool-use ids or exposing them.
+(c) The beta name changes: `_SAFEGUARDS_BETA` in `core/providers/bedrock/converse.py`
+is hard-coded.
 
 ## Per-provider mapping
 

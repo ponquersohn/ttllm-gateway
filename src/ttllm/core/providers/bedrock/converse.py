@@ -200,7 +200,62 @@ def _convert_tools_to_bedrock(tools: list[ToolSpec]) -> list[dict[str, Any]]:
     return tool_specs
 
 
-def build_converse_request(request: InternalRequest, llm_model: Any) -> dict[str, Any]:
+# Beta that gates Anthropic's ``safeguards`` request field on Bedrock (without it Bedrock
+# 400s with "safeguards: Extra inputs are not permitted"). The gateway doesn't forward the
+# caller's ``anthropic-beta`` header, so it's implied here by the field's presence.
+_SAFEGUARDS_BETA = "dangerous-tool-use-2026-09-03"
+
+# Where Converse surfaces the model's ``safeguard_results``: top-level on the
+# non-streaming response, but under the native ``message_delta`` event's ``delta`` on
+# ConverseStream (returned on ``messageStop``) -- "/safeguard_results" there yields nothing.
+_SAFEGUARD_RESULTS_PATH = "/safeguard_results"
+_SAFEGUARD_RESULTS_STREAM_PATH = "/delta/safeguard_results"
+
+
+def _remap_safeguard_results(
+    results: list[dict[str, Any]] | None, tool_call_ids: list[str]
+) -> list[dict[str, Any]] | None:
+    """Rekey ``safeguard_results`` onto the tool-use ids Converse actually returned.
+
+    Converse rewrites every tool-use id (``tooluse_...``), but the results are keyed by the
+    model's native ids (``toolu_bdrk_...``), which Converse never exposes -- so a caller
+    matching results to its tool calls would find nothing. Native ``tool_uses`` entries
+    come in content order (verified against InvokeModel, which exposes both), so they're
+    matched positionally. If the counts disagree the mapping can't be trusted, and a
+    wrong mapping could attach one call's verdict to another, so ``tool_uses`` is emptied
+    instead: the caller then treats those calls as unchecked and checks them itself.
+
+    Workaround for Converse only -- an Anthropic-native upstream (InvokeModel, or the
+    Anthropic API) keeps the ids intact and needs no remapping.
+    """
+    if results is None:
+        return None
+    remapped: list[dict[str, Any]] = []
+    for entry in results:
+        status = entry.get("status")
+        tool_uses = status.get("tool_uses") if isinstance(status, dict) else None
+        if not isinstance(tool_uses, dict):
+            remapped.append(entry)
+            continue
+        if len(tool_uses) == len(tool_call_ids):
+            new_tool_uses = dict(zip(tool_call_ids, tool_uses.values()))
+        else:
+            logger.warning(
+                "Dropping %d safeguard tool_uses verdicts: %d tool calls in the response",
+                len(tool_uses), len(tool_call_ids),
+            )
+            new_tool_uses = {}
+        remapped.append({**entry, "status": {**status, "tool_uses": new_tool_uses}})
+    return remapped
+
+
+def _tool_call_ids(parts: list[Part]) -> list[str]:
+    return [p.id for p in parts if isinstance(p, ToolCallPart)]
+
+
+def build_converse_request(
+    request: InternalRequest, llm_model: Any, *, stream: bool = False
+) -> dict[str, Any]:
     if request.server_tools:
         raise ServerToolError(
             "Server-side tools cannot be proxied through the Bedrock provider. "
@@ -253,6 +308,12 @@ def build_converse_request(request: InternalRequest, llm_model: Any) -> dict[str
                 "type": "enabled",
                 "budget_tokens": request.thinking.budget_tokens,
             }
+    if request.safeguards:
+        additional_fields["safeguards"] = request.safeguards
+        additional_fields["anthropic_beta"] = [_SAFEGUARDS_BETA]
+        params["additionalModelResponseFieldPaths"] = [
+            _SAFEGUARD_RESULTS_STREAM_PATH if stream else _SAFEGUARD_RESULTS_PATH
+        ]
     if additional_fields:
         params["additionalModelRequestFields"] = additional_fields
 
@@ -337,7 +398,14 @@ def parse_converse_response(response: dict[str, Any]) -> InternalResult:
         cache_write_tokens=usage_data.get("cacheWriteInputTokens", 0),
     )
 
-    return InternalResult(content=parts, stop_reason=stop_reason, usage=usage)
+    safeguard_results = response.get("additionalModelResponseFields", {}).get("safeguard_results")
+
+    return InternalResult(
+        content=parts,
+        stop_reason=stop_reason,
+        usage=usage,
+        safeguard_results=_remap_safeguard_results(safeguard_results, _tool_call_ids(parts)),
+    )
 
 
 async def _converse_raw(request: InternalRequest, llm_model: Any) -> dict[str, Any]:
@@ -395,7 +463,7 @@ async def stream_converse_chunks(
     it, so the full response can be rebuilt after the stream ends.
     """
     client = get_boto3_client(llm_model)
-    params = build_converse_request(request, llm_model)
+    params = build_converse_request(request, llm_model, stream=True)
 
     loop = asyncio.get_running_loop()
 
@@ -424,6 +492,7 @@ async def stream_converse_chunks(
     cache_write = 0
     raw_usage: dict[str, Any] = {}
     stop_reason = "end_turn"
+    raw_safeguard_results: list[dict[str, Any]] | None = None
     # Per-index builders for rebuilding the full response from the streamed deltas.
     # Each entry: {"type": "text"|"tool_use"|"thinking", ...accumulators...}.
     assembled: dict[int, dict[str, Any]] = {}
@@ -500,7 +569,10 @@ async def stream_converse_chunks(
                 block_index = idx + 1
 
             elif "messageStop" in event:
-                stop_reason = _map_stop_reason(event["messageStop"].get("stopReason", "end_turn"))
+                message_stop = event["messageStop"]
+                stop_reason = _map_stop_reason(message_stop.get("stopReason", "end_turn"))
+                extra = message_stop.get("additionalModelResponseFields", {})
+                raw_safeguard_results = extra.get("delta", {}).get("safeguard_results")
 
             elif "metadata" in event:
                 usage = event["metadata"].get("usage", {})
@@ -516,6 +588,8 @@ async def stream_converse_chunks(
         yield InternalChunk(kind=ChunkKind.ERROR, error_message=str(exc))
         return
     finally:
+        parts = _assembled_to_parts(assembled)
+        safeguard_results = _remap_safeguard_results(raw_safeguard_results, _tool_call_ids(parts))
         if state is not None:
             state.input_tokens = input_tokens
             state.output_tokens = output_tokens
@@ -523,7 +597,8 @@ async def stream_converse_chunks(
             state.cache_write_tokens = cache_write
             state.raw_usage = raw_usage
             state.stop_reason = stop_reason
-            state.content_parts = _assembled_to_parts(assembled)
+            state.content_parts = parts
+            state.safeguard_results = safeguard_results
 
     # Close any block we opened lazily that Bedrock never sent a stop for, so the
     # consumer never sees message_stop with a content block still open.
@@ -534,6 +609,7 @@ async def stream_converse_chunks(
     yield InternalChunk(
         kind=ChunkKind.MESSAGE_STOP,
         stop_reason=stop_reason,
+        safeguard_results=safeguard_results,
         usage=InternalUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
