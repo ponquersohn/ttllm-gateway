@@ -31,6 +31,21 @@ async def get_group(db: AsyncSession, group_id: uuid.UUID) -> Group | None:
     return result.scalar_one_or_none()
 
 
+async def get_group_by_name(db: AsyncSession, name: str) -> Group | None:
+    result = await db.execute(select(Group).where(Group.name == name))
+    return result.scalar_one_or_none()
+
+
+async def list_group_members(db: AsyncSession, group_id: uuid.UUID) -> list[User]:
+    """List active users who are members of a group."""
+    result = await db.execute(
+        select(User)
+        .join(UserGroup, UserGroup.user_id == User.id)
+        .where(UserGroup.group_id == group_id, User.is_active == True)  # noqa: E712
+    )
+    return list(result.scalars().all())
+
+
 async def list_groups(
     db: AsyncSession,
     offset: int = 0,
@@ -70,10 +85,17 @@ async def update_group(
 
 
 async def delete_group(db: AsyncSession, group_id: uuid.UUID) -> bool:
+    """Permanently remove a group.
+
+    This is a real delete, not a deactivation — ``is_active`` (settable via
+    ``update_group``) is the on/off switch for pausing a group without losing it.
+    Safe unconditionally: group_permissions/user_groups/group_model_assignments
+    cascade at the DB level.
+    """
     group = await db.get(Group, group_id)
     if not group:
         return False
-    group.is_active = False
+    await db.delete(group)
     await db.commit()
     return True
 

@@ -80,7 +80,11 @@ async def update_user(
             validate_password_policy(pw)
             user.password_hash = hash_password(pw)
 
-    _MUTABLE_FIELDS = {"name", "email", "is_active"}
+    # "email" is deliberately not mutable here -- it's the user's immutable identity key
+    # (audit_logs.user_email is grouped/searched on it). "name" is the mutable display
+    # label. UserUpdate doesn't even expose "email", but the API layer passes **kwargs
+    # straight from a dict, so this is the actual enforcement.
+    _MUTABLE_FIELDS = {"name", "is_active"}
     for key, value in kwargs.items():
         if key in _MUTABLE_FIELDS and value is not None:
             setattr(user, key, value)
@@ -91,3 +95,35 @@ async def update_user(
 
 async def deactivate_user(db: AsyncSession, user_id: uuid.UUID) -> User | None:
     return await update_user(db, user_id, is_active=False)
+
+
+async def delete_user(db: AsyncSession, user_id: uuid.UUID) -> bool:
+    """Permanently remove a user.
+
+    This is a real delete, not a deactivation — ``deactivate_user``/``is_active`` is
+    the on/off switch for pausing a user without losing it. Safe unconditionally:
+    memberships/permissions/tokens/model assignments cascade at the DB level, and
+    audit_logs has no FK to users (it keeps a self-contained user_email/user_snapshot
+    instead), so past usage history is unaffected.
+    """
+    user = await db.get(User, user_id)
+    if not user:
+        return False
+    await db.delete(user)
+    await db.commit()
+    return True
+
+
+def build_user_snapshot(user: User) -> dict:
+    """Point-in-time dump of a user, for audit_logs.user_snapshot.
+
+    Captured at request time so audit history stays readable/accurate even after the
+    user is later renamed or deleted. Excludes password_hash/idp_refresh_token.
+    """
+    return {
+        "id": str(user.id),
+        "name": user.name,
+        "email": user.email,
+        "identity_provider": user.identity_provider,
+        "is_active": user.is_active,
+    }

@@ -58,6 +58,7 @@ dev = [
     "black",
     "flake8",
     "isort",
+    "testcontainers[postgres]",
 ]
 
 [project.scripts]
@@ -84,10 +85,11 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short -m 'not integration'"
+addopts = "-v --tb=short -m 'not integration and not migrations'"
 markers = [
     "failing_test: marks tests as known failing (deselect with '-m \"not failing_test\"')",
     "integration: end-to-end tests requiring the docker-compose stack (run with '-m integration')",
+    "migrations: alembic migration tests requiring a real Postgres via testcontainers (run with '-m migrations')",
 ]
 
 [tool.black]

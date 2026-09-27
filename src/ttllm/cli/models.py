@@ -27,11 +27,15 @@ app = TtllmTyper(help="Manage models")
 def models_list(
     offset: int = typer.Option(0),
     limit: int = typer.Option(50),
+    include_inactive: bool = typer.Option(False, "--include-inactive", help="Include deactivated models"),
 ):
     """List all models."""
     with get_client() as client:
         data = handle_response(
-            client.get("/admin/models", params={"offset": offset, "limit": limit})
+            client.get(
+                "/admin/models",
+                params={"offset": offset, "limit": limit, "include_inactive": include_inactive},
+            )
         )
 
     if json_mode():
@@ -41,6 +45,7 @@ def models_list(
     table = Table(title="Models")
     table.add_column("ID", style="dim")
     table.add_column("Name")
+    table.add_column("Display Name")
     table.add_column("Provider")
     table.add_column("Provider Model ID")
     table.add_column("Match Pattern")
@@ -54,6 +59,7 @@ def models_list(
         table.add_row(
             m["id"][:8] + "...",
             m["name"],
+            m.get("display_name") or "",
             m["provider"],
             m["provider_model_id"],
             m.get("match_pattern") or "",
@@ -82,6 +88,8 @@ def models_show(
 
     console.print(f"[bold]Model:[/bold] {data['name']}")
     console.print(f"  ID: {data['id']}")
+    if data.get("display_name"):
+        console.print(f"  Display Name: {data['display_name']}")
     console.print(f"  Provider: {data['provider']}")
     console.print(f"  Provider Model ID: {data['provider_model_id']}")
     console.print(f"  Input cost/1K: {data['input_cost_per_1k']}")
@@ -98,7 +106,8 @@ def models_show(
 
 @app.command("create")
 def models_create(
-    name: str = typer.Option(..., help="Model display name"),
+    name: str = typer.Option(..., help="Model name (routing key matched against a request's 'model' field; must be unique)"),
+    display_name: Optional[str] = typer.Option(None, "--display-name", help="Human-friendly label shown in model listings (falls back to --name when unset)"),
     provider: str = typer.Option(..., help="Provider (bedrock, openai, etc.)"),
     provider_model_id: str = typer.Option(..., help="Provider-specific model ID"),
     input_cost: float = typer.Option(0.0, help="Cost per 1K input tokens"),
@@ -120,6 +129,8 @@ def models_create(
         "cache_read_cost_per_1k": str(cache_read_cost),
         "cache_write_cost_per_1k": str(cache_write_cost),
     }
+    if display_name is not None:
+        body["display_name"] = display_name
     if match_pattern is not None:
         body["match_pattern"] = match_pattern
     with get_client() as client:
@@ -129,13 +140,15 @@ def models_create(
         return
     console.print(f"[green]Model created:[/green] {data['id']}")
     console.print(f"  Name: {data['name']}")
+    if data.get("display_name"):
+        console.print(f"  Display Name: {data['display_name']}")
     console.print(f"  Provider: {data['provider']}")
 
 
 @app.command("update")
 def models_update(
     model: str = typer.Argument(help="Model name (or ID with --use-ids)"),
-    name: Optional[str] = typer.Option(None, "--name", help="New display name"),
+    display_name: Optional[str] = typer.Option(None, "--display-name", help="New display name (use empty string to clear)"),
     provider: Optional[str] = typer.Option(None, "--provider", help="New provider"),
     provider_model_id: Optional[str] = typer.Option(None, "--provider-model-id", help="New provider model ID"),
     config: Optional[str] = typer.Option(None, "--config", help="JSON config (replaces existing; use --merge-config to shallow-merge)"),
@@ -147,13 +160,19 @@ def models_update(
     match_pattern: Optional[str] = typer.Option(None, "--match-pattern", help="Regex pattern (use empty string to clear)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat model argument as UUID"),
 ):
-    """Update an existing model."""
+    """Update an existing model.
+
+    ``name`` (the routing key) can't be changed here -- it's the model's immutable
+    identity, since audit history is recorded and reported against it. Delete and
+    recreate the model if you need a different name. Use --display-name for a
+    human-friendly label that can change freely.
+    """
     if merge_config and config is None:
         console.print("[red]--merge-config requires --config[/red]")
         raise typer.Exit(1)
     body: dict = {}
-    if name is not None:
-        body["name"] = name
+    if display_name is not None:
+        body["display_name"] = display_name
     if provider is not None:
         body["provider"] = provider
     if provider_model_id is not None:
@@ -189,15 +208,15 @@ def models_delete(
     model: str = typer.Argument(help="Model name (or ID with --use-ids)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat model argument as UUID"),
 ):
-    """Deactivate a model."""
+    """Permanently delete a model."""
     with get_client() as client:
         model_id = model if use_ids else resolve_model(client, model)
         resp = client.delete(f"/admin/models/{model_id}")
         if resp.status_code == 204:
             if json_mode():
-                print_json({"status": "deactivated", "id": model_id})
+                print_json({"status": "deleted", "id": model_id})
             else:
-                console.print("[green]Model deactivated.[/green]")
+                console.print("[green]Model deleted.[/green]")
         else:
             handle_response(resp)
 

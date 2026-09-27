@@ -24,11 +24,15 @@ app = TtllmTyper(help="Manage users")
 def users_list(
     offset: int = typer.Option(0, help="Offset for pagination"),
     limit: int = typer.Option(50, help="Limit for pagination"),
+    include_inactive: bool = typer.Option(False, "--include-inactive", help="Include deactivated users"),
 ):
     """List all users."""
     with get_client() as client:
         data = handle_response(
-            client.get("/admin/users", params={"offset": offset, "limit": limit})
+            client.get(
+                "/admin/users",
+                params={"offset": offset, "limit": limit, "include_inactive": include_inactive},
+            )
         )
 
     if json_mode():
@@ -145,21 +149,23 @@ def users_models(
 @app.command("update")
 def users_update(
     user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
-    name: Optional[str] = typer.Option(None, "--name", help="New name"),
-    email: Optional[str] = typer.Option(None, "--email", help="New email"),
+    name: Optional[str] = typer.Option(None, "--name", help="New display name"),
     password: Optional[str] = typer.Option(None, "--password", help="New password"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
 ):
-    """Update a user's details."""
+    """Update a user's details.
+
+    ``email`` can't be changed here -- it's the user's immutable identity, since audit
+    history is recorded and reported against it. Delete and recreate the user if you
+    need a different email.
+    """
     body: dict = {}
     if name is not None:
         body["name"] = name
-    if email is not None:
-        body["email"] = email
     if password is not None:
         body["password"] = password
     if not body:
-        console.print("[red]Nothing to update. Provide --name, --email, or --password.[/red]")
+        console.print("[red]Nothing to update. Provide --name or --password.[/red]")
         raise typer.Exit(1)
     with get_client() as client:
         user_id = user if use_ids else resolve_user(client, user)
@@ -175,15 +181,15 @@ def users_delete(
     user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
 ):
-    """Deactivate a user."""
+    """Permanently delete a user."""
     with get_client() as client:
         user_id = user if use_ids else resolve_user(client, user)
         resp = client.delete(f"/admin/users/{user_id}")
         if resp.status_code == 204:
             if json_mode():
-                print_json({"status": "deactivated", "id": user_id})
+                print_json({"status": "deleted", "id": user_id})
             else:
-                console.print("[green]User deactivated.[/green]")
+                console.print("[green]User deleted.[/green]")
         else:
             handle_response(resp)
 

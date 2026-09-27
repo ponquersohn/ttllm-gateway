@@ -140,8 +140,11 @@ async def list_users(
     ctx: AuthContext = Depends(require_permission(Permissions.USER_VIEW)),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    include_inactive: bool = Query(False),
 ):
-    users, total = await user_service.list_users(db, offset=offset, limit=limit)
+    users, total = await user_service.list_users(
+        db, offset=offset, limit=limit, include_inactive=include_inactive
+    )
     items = []
     for u in users:
         groups = await group_service.list_user_groups(db, u.id)
@@ -162,7 +165,7 @@ async def create_user(
     except ValueError as e:
         raise HTTPException(400, detail={"type": "invalid_request", "message": str(e)})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="user.create", resource_type="user", resource_id=user.id,
         details={"email": body.email},
     )
@@ -207,7 +210,7 @@ async def update_user(
     if not user:
         raise HTTPException(404, detail={"type": "not_found", "message": "User not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="user.update", resource_type="user", resource_id=user_id,
         details={"fields": list(body.model_dump(exclude_unset=True).keys())},
     )
@@ -221,11 +224,25 @@ async def delete_user(
     db: DB,
     ctx: AuthContext = Depends(require_permission(Permissions.USER_DELETE)),
 ):
-    user = await user_service.deactivate_user(db, user_id)
-    if not user:
+    if user_id == ctx.user.id:
+        raise HTTPException(
+            409, detail={"type": "conflict", "message": "Cannot delete your own account"}
+        )
+
+    admins = await group_service.get_group_by_name(db, "administrators")
+    if admins:
+        member_ids = {u.id for u in await group_service.list_group_members(db, admins.id)}
+        if user_id in member_ids and len(member_ids) <= 1:
+            raise HTTPException(
+                409,
+                detail={"type": "conflict", "message": "Cannot delete the last administrator"},
+            )
+
+    deleted = await user_service.delete_user(db, user_id)
+    if not deleted:
         raise HTTPException(404, detail={"type": "not_found", "message": "User not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="user.delete", resource_type="user", resource_id=user_id,
     )
 
@@ -272,7 +289,7 @@ async def assign_user_permissions(
         except Exception:
             results.append({"permission": perm, "status": "already_assigned"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="user.assign_permission", resource_type="user", resource_id=user_id,
         details={"permissions": body.permissions},
     )
@@ -290,7 +307,7 @@ async def unassign_user_permission(
     if not removed:
         raise HTTPException(404, detail={"type": "not_found", "message": "Permission assignment not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="user.unassign_permission", resource_type="user", resource_id=user_id,
         details={"permission": permission},
     )
@@ -305,8 +322,11 @@ async def list_models(
     ctx: AuthContext = Depends(require_permission(Permissions.MODEL_VIEW)),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    include_inactive: bool = Query(False),
 ):
-    models, total = await model_service.list_models(db, offset=offset, limit=limit)
+    models, total = await model_service.list_models(
+        db, offset=offset, limit=limit, include_inactive=include_inactive
+    )
     return PaginatedResponse(
         items=[ModelResponse.model_validate(m) for m in models],
         total=total,
@@ -336,6 +356,7 @@ async def create_model(
     model = await model_service.create_model(
         db,
         name=body.name,
+        display_name=body.display_name,
         provider=body.provider,
         provider_model_id=body.provider_model_id,
         config_json=body.config_json,
@@ -346,7 +367,7 @@ async def create_model(
         match_pattern=body.match_pattern,
     )
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="model.create", resource_type="model", resource_id=model.id,
         details={"name": body.name},
     )
@@ -366,7 +387,7 @@ async def update_model(
     if not model:
         raise HTTPException(404, detail={"type": "not_found", "message": "Model not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="model.update", resource_type="model", resource_id=model_id,
         details={"fields": [k for k in body.model_dump(exclude_unset=True) if k != "merge_config"]},
     )
@@ -383,7 +404,7 @@ async def delete_model(
     if not deleted:
         raise HTTPException(404, detail={"type": "not_found", "message": "Model not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="model.delete", resource_type="model", resource_id=model_id,
     )
 
@@ -410,7 +431,7 @@ async def assign_model(
         except Exception:
             results.append({"user_id": str(user_id), "status": "already_assigned"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="model.assign_to_user", resource_type="model", resource_id=model_id,
         details={"user_ids": [str(uid) for uid in body.user_ids]},
     )
@@ -430,7 +451,7 @@ async def unassign_model(
             404, detail={"type": "not_found", "message": "Assignment not found"}
         )
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="model.unassign_from_user", resource_type="model", resource_id=model_id,
         details={"user_id": str(user_id)},
     )
@@ -455,7 +476,7 @@ async def assign_model_to_group(
         except Exception:
             results.append({"group_id": str(group_id), "status": "already_assigned"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="model.assign_to_group", resource_type="model", resource_id=model_id,
         details={"group_ids": [str(gid) for gid in body.group_ids]},
     )
@@ -475,7 +496,7 @@ async def unassign_model_from_group(
             404, detail={"type": "not_found", "message": "Assignment not found"}
         )
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="model.unassign_from_group", resource_type="model", resource_id=model_id,
         details={"group_id": str(group_id)},
     )
@@ -490,8 +511,11 @@ async def list_groups(
     ctx: AuthContext = Depends(require_permission(Permissions.GROUP_VIEW)),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    include_inactive: bool = Query(False),
 ):
-    groups, total = await group_service.list_groups(db, offset=offset, limit=limit)
+    groups, total = await group_service.list_groups(
+        db, offset=offset, limit=limit, include_inactive=include_inactive
+    )
     return PaginatedResponse(
         items=[_group_response(g) for g in groups],
         total=total,
@@ -508,7 +532,7 @@ async def create_group(
 ):
     group = await group_service.create_group(db, name=body.name, description=body.description)
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="group.create", resource_type="group", resource_id=group.id,
         details={"name": body.name},
     )
@@ -538,7 +562,7 @@ async def update_group(
     if not group:
         raise HTTPException(404, detail={"type": "not_found", "message": "Group not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="group.update", resource_type="group", resource_id=group_id,
         details={"fields": list(body.model_dump(exclude_unset=True).keys())},
     )
@@ -555,7 +579,7 @@ async def delete_group(
     if not deleted:
         raise HTTPException(404, detail={"type": "not_found", "message": "Group not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="group.delete", resource_type="group", resource_id=group_id,
     )
 
@@ -575,7 +599,7 @@ async def assign_group_permission(
     except Exception:
         raise HTTPException(409, detail={"type": "conflict", "message": "Permission already assigned"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="group.assign_permission", resource_type="group", resource_id=group_id,
         details={"permission": body.permission},
     )
@@ -593,7 +617,7 @@ async def unassign_group_permission(
     if not removed:
         raise HTTPException(404, detail={"type": "not_found", "message": "Permission assignment not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="group.unassign_permission", resource_type="group", resource_id=group_id,
         details={"permission": permission},
     )
@@ -614,7 +638,7 @@ async def add_group_members(
         except Exception:
             results.append({"user_id": str(user_id), "status": "already_member"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="group.add_member", resource_type="group", resource_id=group_id,
         details={"user_ids": [str(uid) for uid in body.user_ids]},
     )
@@ -632,7 +656,7 @@ async def remove_group_member(
     if not removed:
         raise HTTPException(404, detail={"type": "not_found", "message": "Member not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="group.remove_member", resource_type="group", resource_id=group_id,
         details={"user_id": str(user_id)},
     )
@@ -655,7 +679,7 @@ async def create_token(
     except ValueError as e:
         raise HTTPException(400, detail={"type": "invalid_request", "message": str(e)})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="token.create", resource_type="token", resource_id=result.id,
         details={"label": body.label, "target_user_id": str(target_user_id)},
     )
@@ -707,7 +731,7 @@ async def revoke_token(
     if not revoked:
         raise HTTPException(404, detail={"type": "not_found", "message": "Token not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="token.revoke", resource_type="token", resource_id=token_id,
     )
 
@@ -810,7 +834,7 @@ async def create_secret(
         db, name=body.name, plaintext_value=body.value, description=body.description,
     )
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="secret.create", resource_type="secret", resource_id=secret.id,
         details={"name": body.name},
     )
@@ -847,7 +871,7 @@ async def update_secret(
     if not secret:
         raise HTTPException(404, detail={"type": "not_found", "message": "Secret not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="secret.update", resource_type="secret", resource_id=secret_id,
         details={"fields": list(kwargs.keys())},
     )
@@ -864,7 +888,7 @@ async def delete_secret(
     if not deleted:
         raise HTTPException(404, detail={"type": "not_found", "message": "Secret not found"})
     await admin_audit_service.log(
-        db, actor_id=ctx.user.id, actor_jti=ctx.jti,
+        db, actor=ctx.user, actor_jti=ctx.jti,
         action="secret.delete", resource_type="secret", resource_id=secret_id,
     )
 
@@ -951,7 +975,7 @@ async def create_rule(
     )
     await admin_audit_service.log(
         db,
-        actor_id=ctx.user.id,
+        actor=ctx.user,
         actor_jti=ctx.jti,
         action="rule.create",
         resource_type="rule",
@@ -987,7 +1011,7 @@ async def update_rule(
         raise HTTPException(404, detail={"type": "not_found", "message": "Rule not found"})
     await admin_audit_service.log(
         db,
-        actor_id=ctx.user.id,
+        actor=ctx.user,
         actor_jti=ctx.jti,
         action="rule.update",
         resource_type="rule",
@@ -1008,7 +1032,7 @@ async def delete_rule(
         raise HTTPException(404, detail={"type": "not_found", "message": "Rule not found"})
     await admin_audit_service.log(
         db,
-        actor_id=ctx.user.id,
+        actor=ctx.user,
         actor_jti=ctx.jti,
         action="rule.delete",
         resource_type="rule",

@@ -42,7 +42,8 @@ def audit_logs_list(
     table = Table(title="Audit Logs")
     table.add_column("Time")
     table.add_column("Request ID", style="dim")
-    table.add_column("User", style="dim")
+    table.add_column("User")
+    table.add_column("Model")
     table.add_column("Status")
     table.add_column("Input", justify="right")
     table.add_column("Output", justify="right")
@@ -54,7 +55,8 @@ def audit_logs_list(
         table.add_row(
             log["created_at"][:19],
             log["request_id"][:8] + "...",
-            log["user_id"][:8] + "...",
+            log["user_email"],
+            log["model_name"],
             f"[{status_style}]{log['status_code']}[/{status_style}]",
             str(log["input_tokens"]),
             str(log["output_tokens"]),

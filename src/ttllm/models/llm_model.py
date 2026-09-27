@@ -53,9 +53,11 @@ class ModelAssignment(Base):
     __table_args__ = (UniqueConstraint("user_id", "model_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     model_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("llm_models.id"), nullable=False
+        ForeignKey("llm_models.id", ondelete="CASCADE"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -71,10 +73,10 @@ class GroupModelAssignment(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     group_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("groups.id"), nullable=False
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
     )
     model_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("llm_models.id"), nullable=False
+        ForeignKey("llm_models.id", ondelete="CASCADE"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

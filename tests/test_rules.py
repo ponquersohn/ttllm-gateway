@@ -704,7 +704,7 @@ class TestWindowAggregate:
         )
         # Inspect the compiled SQL of the query that was executed.
         compiled = str(db.execute.await_args.args[0])
-        assert "llm_models" in compiled
+        assert "audit_logs.model_name" in compiled
         assert "status_code" in compiled
 
     @pytest.mark.asyncio

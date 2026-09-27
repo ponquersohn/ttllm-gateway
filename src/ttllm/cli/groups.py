@@ -24,11 +24,15 @@ app = TtllmTyper(help="Manage groups")
 def groups_list(
     offset: int = typer.Option(0),
     limit: int = typer.Option(50),
+    include_inactive: bool = typer.Option(False, "--include-inactive", help="Include deactivated groups"),
 ):
     """List all groups."""
     with get_client() as client:
         data = handle_response(
-            client.get("/admin/groups", params={"offset": offset, "limit": limit})
+            client.get(
+                "/admin/groups",
+                params={"offset": offset, "limit": limit, "include_inactive": include_inactive},
+            )
         )
 
     if json_mode():

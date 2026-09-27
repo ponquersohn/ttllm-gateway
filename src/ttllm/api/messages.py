@@ -22,7 +22,7 @@ from ttllm.core.errors import ServerToolError, UnsupportedContentError
 from ttllm.core.permissions import Permissions
 from ttllm.core.rules import ActionType
 from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse
-from ttllm.services import audit_service, model_service, rules_service, secret_service
+from ttllm.services import audit_service, model_service, rules_service, secret_service, user_service
 
 logger = logging.getLogger(__name__)
 
@@ -153,15 +153,26 @@ async def create_message(
     resolved_config = await secret_service.resolve_model_config(db, llm_model.config_json or {})
     resolved_model = _ModelProxy(llm_model, resolved_config)
 
+    # Snapshotted from the raw `llm_model`/`ctx.user` -- *before* wrapping in _ModelProxy,
+    # whose config_json property returns resolved (decrypted) secrets that must never land
+    # in an audit row. Threaded through as one bundle rather than growing every handler's
+    # signature by four params.
+    audit_ctx = {
+        "model_name": llm_model.name,
+        "model_snapshot": model_service.build_model_snapshot(llm_model),
+        "user_email": ctx.user.email,
+        "user_snapshot": user_service.build_user_snapshot(ctx.user),
+    }
+
     metadata = {
         "client_ip": request.client.host if request.client else None,
         "user_agent": request.headers.get("user-agent"),
     }
 
     if body.stream:
-        return await _handle_streaming(body, resolved_model, ctx.user, db, request_id, metadata)
+        return await _handle_streaming(body, resolved_model, ctx.user, db, request_id, metadata, audit_ctx)
     else:
-        return await _handle_invoke(body, resolved_model, ctx.user, db, request_id, metadata)
+        return await _handle_invoke(body, resolved_model, ctx.user, db, request_id, metadata, audit_ctx)
 
 
 async def _finalize(
@@ -172,6 +183,7 @@ async def _finalize(
     db,
     request_id,
     metadata,
+    audit_ctx,
     *,
     status_code: int = 200,
     error_message: str | None = None,
@@ -194,6 +206,7 @@ async def _finalize(
         request_id=request_id,
         input_tokens=state.input_tokens,
         output_tokens=state.output_tokens,
+        **audit_ctx,
         total_cost=str(state.get_cost()),
         latency_ms=provider_metadata.get("latency_ms", 0),
         status_code=status_code,
@@ -205,7 +218,7 @@ async def _finalize(
     )
 
 
-async def _log_error(exc, llm_model, user, db, request_id, metadata):
+async def _log_error(exc, llm_model, user, db, request_id, metadata, audit_ctx):
     status, error_type, message = _classify_provider_error(exc)
     logger.exception("Request %s failed (type=%s)", request_id, error_type)
     await audit_service.log_request(
@@ -215,6 +228,7 @@ async def _log_error(exc, llm_model, user, db, request_id, metadata):
         request_id=request_id,
         input_tokens=0,
         output_tokens=0,
+        **audit_ctx,
         latency_ms=0,
         status_code=status,
         error_message=str(exc),
@@ -223,19 +237,19 @@ async def _log_error(exc, llm_model, user, db, request_id, metadata):
     return status, error_type, message
 
 
-async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
+async def _handle_invoke(body, llm_model, user, db, request_id, metadata, audit_ctx):
     try:
         internal_request = anthropic_adapter.request_to_internal(body, llm_model)
         state = await gateway.invoke(internal_request, llm_model, request_id)
         response = anthropic_adapter.result_to_response(state.get_response(), llm_model.name, request_id)
-        await _finalize(state, body, llm_model, user, db, request_id, metadata, response=response)
+        await _finalize(state, body, llm_model, user, db, request_id, metadata, audit_ctx, response=response)
         # safeguard_results only appears when safeguards actually ran, as on Anthropic's API.
         exclude = {"safeguard_results"} if response.safeguard_results is None else None
         return JSONResponse(content=response.model_dump(exclude=exclude))
 
     except Exception as exc:
         status, error_type, message = await _log_error(
-            exc, llm_model, user, db, request_id, metadata
+            exc, llm_model, user, db, request_id, metadata, audit_ctx
         )
         raise HTTPException(
             status_code=status,
@@ -243,7 +257,7 @@ async def _handle_invoke(body, llm_model, user, db, request_id, metadata):
         )
 
 
-async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
+async def _handle_streaming(body, llm_model, user, db, request_id, metadata, audit_ctx):
     try:
         internal_request = anthropic_adapter.request_to_internal(body, llm_model)
         state, chunk_stream = gateway.stream(internal_request, llm_model, request_id)
@@ -317,6 +331,7 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
                     db,
                     request_id,
                     metadata,
+                    audit_ctx,
                     status_code=finalize_status,
                     error_message=finalize_error,
                     response=response,
@@ -354,7 +369,7 @@ async def _handle_streaming(body, llm_model, user, db, request_id, metadata):
         )
     except Exception as exc:
         status, error_type, message = await _log_error(
-            exc, llm_model, user, db, request_id, metadata
+            exc, llm_model, user, db, request_id, metadata, audit_ctx
         )
         raise HTTPException(
             status_code=status,

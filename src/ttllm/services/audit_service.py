@@ -20,6 +20,11 @@ async def log_request(
     request_id: uuid.UUID,
     input_tokens: int,
     output_tokens: int,
+    *,
+    model_name: str,
+    model_snapshot: dict,
+    user_email: str,
+    user_snapshot: dict,
     total_cost: str | None = None,
     latency_ms: int = 0,
     status_code: int = 200,
@@ -30,10 +35,21 @@ async def log_request(
     response_body: dict | None = None,
     log_bodies: bool | None = None,
 ) -> AuditLog:
-    """Write an audit log entry. Optionally includes request/response bodies."""
+    """Write an audit log entry. Optionally includes request/response bodies.
+
+    ``model_name``/``user_email`` (searchable) and ``model_snapshot``/``user_snapshot``
+    (full point-in-time dump) are captured by the caller at request time, so this row
+    stays a self-contained, accurate historical record even if the model or user is
+    later renamed or deleted — ``model_id``/``user_id`` carry no FK and are kept only
+    for convenience joins against currently-live rows.
+    """
     audit = AuditLog(
         user_id=user_id,
+        user_email=user_email,
+        user_snapshot=user_snapshot,
         model_id=model_id,
+        model_name=model_name,
+        model_snapshot=model_snapshot,
         request_id=request_id,
         input_tokens=input_tokens,
         output_tokens=output_tokens,

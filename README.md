@@ -445,6 +445,22 @@ Now any request with a model string starting with `claude-haiku-4.5` (e.g. `clau
 - Invalid regex patterns are rejected at creation time.
 - To clear a pattern: `ttllm models update <name> --match-pattern ""`
 
+## Display Name
+
+`--name` is the routing key: it must be unique, and it's what clients put in a request's `model` field (and what's echoed back in the response). It is **not** meant to be a friendly label.
+
+For a human-readable label shown in model listings, set `--display-name` separately:
+
+```bash
+ttllm models create \
+  --name claude-sonnet \
+  --display-name "TTLLM - Claude Sonnet" \
+  --provider bedrock \
+  --provider-model-id anthropic.claude-sonnet-4-20250514-v1:0
+```
+
+`display_name` is purely cosmetic — it's rendered by `GET /anthropic/v1/models` (model discovery), `GET /me/models`, and the `ttllm models`/`ttllm me models` CLI tables, and falls back to `--name` when unset. It has no effect on request routing, the rules engine, or quota scoping, all of which continue to match on `name`. Update it any time with `ttllm models update <name> --display-name "..."` (empty string clears it, falling back to `--name` again).
+
 ## Model Pricing
 
 Each model carries per-1K-token prices used to compute the cost recorded in audit logs:
@@ -513,7 +529,7 @@ ttllm reports generate [--user] [--since] [--until] [--format pdf|html] [-o file
 ttllm audit-logs [--user] [--model] [--limit]
 ```
 
-Every command accepts `--json` for machine-readable output instead of formatted tables/text — including mutations (`create`/`update`/`delete`/`assign`/...). Commands that create or update a resource emit the resource object; delete/revoke commands (which return HTTP 204) emit a small status object such as `{"status": "deactivated", "id": "..."}`.
+Every command accepts `--json` for machine-readable output instead of formatted tables/text — including mutations (`create`/`update`/`delete`/`assign`/...). Commands that create or update a resource emit the resource object; delete/revoke commands (which return HTTP 204) emit a small status object such as `{"status": "deleted", "id": "..."}`.
 
 `ttllm usage --since/--until` accepts ISO datetimes and relative UTC offsets such as `-24h`, `-7d`, `-30m`, or `-1w`.
 
@@ -589,8 +605,29 @@ For end-user documentation covering login, token creation, API usage, SDK integr
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # unit tests (integration tests are excluded by default)
+pytest                       # unit tests (integration and migration tests are excluded by default)
 ```
+
+### Migration tests
+
+`tests/migrations/` tests Alembic migrations themselves against a real, disposable Postgres
+(spun up per test run via `testcontainers`, not docker-compose) — things unit tests can't
+reach because they mock the database entirely: does a migration's data backfill actually
+produce the right shape (JSONB round-tripping through the real asyncpg driver, not a sync
+one that might hide a serialization bug), do `ON DELETE CASCADE`s actually fire, is
+`upgrade → downgrade → upgrade` reversible, and — the single highest-value generic check —
+does the live schema after `upgrade head` actually match the SQLAlchemy models
+(`Base.metadata`), catching drift between a hand-edited ORM model and its migration.
+
+```bash
+pytest -m migrations
+```
+
+Needs a local Docker daemon (no docker-compose stack — testcontainers talks to Docker
+directly). Runs in its own CI job (`.github/workflows/integration.yml`), never alongside the
+rest of the suite: Alembic's `Config` calls `logging.config.fileConfig()` internally, which
+reconfigures Python's global logging and would otherwise corrupt other tests' `caplog`
+expectations later in the same process.
 
 ### Integration tests
 

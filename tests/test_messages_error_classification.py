@@ -65,7 +65,7 @@ async def test_unsupported_content_surfaces_as_400_from_handle_invoke(monkeypatc
     user = SimpleNamespace(id=uuid.uuid4())
 
     with pytest.raises(HTTPException) as exc_info:
-        await _handle_invoke(body, model, user, object(), uuid.uuid4(), {})
+        await _handle_invoke(body, model, user, object(), uuid.uuid4(), {}, {})
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail["type"] == "invalid_request_error"

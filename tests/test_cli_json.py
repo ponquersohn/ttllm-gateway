@@ -119,4 +119,4 @@ def test_users_delete_json_emits_synthetic_status(monkeypatch):
 
     result = runner.invoke(users.app, ["delete", "some-id", "--use-ids", "--json"])
     assert result.exit_code == 0
-    assert json.loads(result.output) == {"status": "deactivated", "id": "some-id"}
+    assert json.loads(result.output) == {"status": "deleted", "id": "some-id"}
