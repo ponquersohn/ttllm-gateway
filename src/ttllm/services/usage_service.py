@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Numeric, cast, func, select
+from sqlalchemy import Numeric, String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ttllm.models.audit import AuditLog
@@ -184,7 +184,10 @@ async def get_user_usage_summary(
     user_name = AuditLog.user_snapshot["name"].astext
     query = (
         select(
-            func.max(AuditLog.user_id).label("user_id"),
+            # Postgres has no MAX() aggregate for uuid (only comparison operators, no
+            # built-in aggregate function) -- cast to text first, same as user_id's
+            # eventual str() in the response.
+            func.max(cast(AuditLog.user_id, String)).label("user_id"),
             func.max(user_name).label("user_name"),
             AuditLog.user_email.label("user_email"),
             func.count(AuditLog.id).label("request_count"),

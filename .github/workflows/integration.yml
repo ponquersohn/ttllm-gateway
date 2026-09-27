@@ -75,7 +75,19 @@ jobs:
 
       - name: Dump compose logs on failure
         if: failure()
-        run: docker compose -f docker-compose.integration.yml logs
+        run: |
+          mkdir -p compose-logs
+          for svc in db gateway fake-bedrock; do
+            docker compose -f docker-compose.integration.yml logs --no-color "$svc" > "compose-logs/${svc}.log" 2>&1 || true
+          done
+
+      - name: Upload compose logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-compose-logs
+          path: compose-logs/
+          retention-days: 7
 
       - name: Tear down
         if: always()
