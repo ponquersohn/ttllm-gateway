@@ -14,8 +14,8 @@ class Rule(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), unique=True)
     description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    weight: Mapped[int] = mapped_column(Integer, default=0)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    weight: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     conditions: Mapped[dict] = mapped_column(JSONB, nullable=False)
     action: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

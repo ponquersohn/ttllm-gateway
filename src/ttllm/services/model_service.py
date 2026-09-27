@@ -18,6 +18,7 @@ async def create_model(
     name: str,
     provider: str,
     provider_model_id: str,
+    display_name: str | None = None,
     config_json: dict | None = None,
     input_cost_per_1k: Decimal = Decimal("0"),
     output_cost_per_1k: Decimal = Decimal("0"),
@@ -27,6 +28,7 @@ async def create_model(
 ) -> LLMModel:
     model = LLMModel(
         name=name,
+        display_name=display_name,
         provider=provider,
         provider_model_id=provider_model_id,
         config_json=config_json or {},
@@ -82,7 +84,11 @@ async def update_model(
     if kwargs.pop("merge_config", False) and "config_json" in kwargs:
         merged = {**(model.config_json or {}), **kwargs.pop("config_json")}
         setattr(model, "config_json", merged)
-    _MUTABLE_FIELDS = {"name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "cache_read_cost_per_1k", "cache_write_cost_per_1k", "is_active", "match_pattern"}
+    # "name" is deliberately not mutable here -- it's the model's immutable identity/
+    # routing key (audit_logs.model_name is grouped/searched on it). "display_name" is
+    # the mutable, human-friendly label. ModelUpdate doesn't even expose "name", but the
+    # API layer passes **kwargs straight from a dict, so this is the actual enforcement.
+    _MUTABLE_FIELDS = {"display_name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "cache_read_cost_per_1k", "cache_write_cost_per_1k", "is_active", "match_pattern"}
     for key, value in kwargs.items():
         if key in _MUTABLE_FIELDS and value is not None:
             setattr(model, key, value)
@@ -92,12 +98,44 @@ async def update_model(
 
 
 async def delete_model(db: AsyncSession, model_id: uuid.UUID) -> bool:
+    """Permanently remove a model.
+
+    This is a real delete, not a deactivation — ``is_active`` (settable via
+    ``update_model``) is the on/off switch for pausing a model without losing it.
+    Safe unconditionally: model_assignments/group_model_assignments cascade at the DB
+    level, and audit_logs has no FK to llm_models (it keeps a self-contained
+    model_name/model_snapshot instead), so past usage history is unaffected.
+    """
     model = await db.get(LLMModel, model_id)
     if not model:
         return False
-    model.is_active = False
+    await db.delete(model)
     await db.commit()
     return True
+
+
+def build_model_snapshot(model: LLMModel) -> dict:
+    """Point-in-time dump of a model, for audit_logs.model_snapshot.
+
+    Captured at request time so audit history stays readable/accurate even after the
+    model is later renamed or deleted. Not redacted: config_json only ever holds
+    ``secret://`` references (resolution happens transiently, never persisted), and
+    what an admin puts in it is their call, not something we should second-guess here.
+    """
+    return {
+        "id": str(model.id),
+        "name": model.name,
+        "display_name": model.display_name,
+        "provider": model.provider,
+        "provider_model_id": model.provider_model_id,
+        "config_json": model.config_json,
+        "input_cost_per_1k": str(model.input_cost_per_1k),
+        "output_cost_per_1k": str(model.output_cost_per_1k),
+        "cache_read_cost_per_1k": str(model.cache_read_cost_per_1k),
+        "cache_write_cost_per_1k": str(model.cache_write_cost_per_1k),
+        "match_pattern": model.match_pattern,
+        "is_active": model.is_active,
+    }
 
 
 # --- Assignments ---

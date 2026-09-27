@@ -48,8 +48,11 @@ class UserCreate(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    """``email`` is deliberately absent: it's the user's immutable identity key (audit
+    reports group by it, same role ``LLMModel.name`` plays for models). To change it,
+    delete and recreate the user. ``name`` is the mutable display label."""
+
     name: str | None = None
-    email: str | None = None
     password: str | None = None
     is_active: bool | None = None
 
@@ -100,7 +103,10 @@ class ModelCreate(BaseModel):
 
 
 class ModelUpdate(BaseModel):
-    name: str | None = None
+    """``name`` is deliberately absent: it's the model's immutable identity/routing key
+    (audit reports group by it, and requests are matched against it). To change it,
+    delete and recreate the model. ``display_name`` is the mutable, human-friendly label."""
+
     display_name: str | None = None
     provider: str | None = None
     provider_model_id: str | None = None
@@ -160,7 +166,11 @@ class GroupAssignRequest(BaseModel):
 class AuditLogResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
+    user_email: str
+    user_snapshot: dict[str, Any]
     model_id: uuid.UUID
+    model_name: str
+    model_snapshot: dict[str, Any]
     request_id: uuid.UUID
     input_tokens: int
     output_tokens: int

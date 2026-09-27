@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -9,13 +9,26 @@ from ttllm.models import Base
 
 
 class AuditLog(Base):
+    """A historical, append-only record of a gateway call.
+
+    ``user_id``/``model_id`` are deliberately plain UUIDs, *not* foreign keys: this table
+    must never be blocked by (or silently mutated via ON DELETE) a later user/model
+    deletion. They're kept only for convenience joins against currently-live rows.
+    ``user_email``/``model_name`` (searchable) and ``user_snapshot``/``model_snapshot``
+    (full point-in-time dump) are the authoritative, self-contained record of who/what was
+    actually involved — immune to a later rename or deletion of the user/model row.
+    """
+
     __tablename__ = "audit_logs"
+    __table_args__ = (Index("ix_audit_logs_user_id_created_at", "user_id", "created_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
-    model_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("llm_models.id"), nullable=False
-    )
+    user_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
+    user_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    model_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
     request_id: Mapped[uuid.UUID] = mapped_column(index=True)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)

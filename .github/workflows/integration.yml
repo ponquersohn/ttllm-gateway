@@ -19,7 +19,27 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Unit tests
-        run: pytest -m "not integration"
+        # migrations tests must never run in this process: alembic's Config() calls
+        # logging.config.fileConfig() internally, which reconfigures Python's global
+        # logging and silently corrupts other tests' caplog expectations later in the
+        # same run. They get their own job below instead.
+        run: pytest -m "not integration and not migrations"
+
+  migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Migration tests
+        # No docker-compose stack needed -- testcontainers talks to the runner's own
+        # docker daemon directly to spin up a disposable Postgres per test.
+        run: pytest -m migrations
 
   integration:
     runs-on: ubuntu-latest
@@ -55,7 +75,19 @@ jobs:
 
       - name: Dump compose logs on failure
         if: failure()
-        run: docker compose -f docker-compose.integration.yml logs
+        run: |
+          mkdir -p compose-logs
+          for svc in db gateway fake-bedrock; do
+            docker compose -f docker-compose.integration.yml logs --no-color "$svc" > "compose-logs/${svc}.log" 2>&1 || true
+          done
+
+      - name: Upload compose logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-compose-logs
+          path: compose-logs/
+          retention-days: 7
 
       - name: Tear down
         if: always()

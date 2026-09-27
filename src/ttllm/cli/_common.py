@@ -102,8 +102,10 @@ def handle_response(resp: httpx.Response) -> dict:
 
 
 def resolve_user(client: httpx.Client, name: str) -> str:
-    """Resolve a user name to a user ID."""
-    data = handle_response(client.get("/admin/users", params={"limit": 200}))
+    """Resolve a user name to a user ID (including deactivated users)."""
+    data = handle_response(
+        client.get("/admin/users", params={"limit": 200, "include_inactive": True})
+    )
     needle = name.lower()
     for u in data["items"]:
         if u["name"].lower() == needle or u["email"].lower() == needle:
@@ -113,8 +115,10 @@ def resolve_user(client: httpx.Client, name: str) -> str:
 
 
 def resolve_group(client: httpx.Client, name: str) -> str:
-    """Resolve a group name to a group ID."""
-    data = handle_response(client.get("/admin/groups", params={"limit": 200}))
+    """Resolve a group name to a group ID (including deactivated groups)."""
+    data = handle_response(
+        client.get("/admin/groups", params={"limit": 200, "include_inactive": True})
+    )
     needle = name.lower()
     for g in data["items"]:
         if g["name"].lower() == needle:
@@ -124,8 +128,10 @@ def resolve_group(client: httpx.Client, name: str) -> str:
 
 
 def resolve_model(client: httpx.Client, name: str) -> str:
-    """Resolve a model name to a model ID."""
-    data = handle_response(client.get("/admin/models", params={"limit": 200}))
+    """Resolve a model name to a model ID (including deactivated models)."""
+    data = handle_response(
+        client.get("/admin/models", params={"limit": 200, "include_inactive": True})
+    )
     needle = name.lower()
     for m in data["items"]:
         if m["name"].lower() == needle:

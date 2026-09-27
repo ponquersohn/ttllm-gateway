@@ -39,10 +39,11 @@ def me_models():
 
     table = Table(title="My Models")
     table.add_column("Name")
+    table.add_column("Display Name")
     table.add_column("Provider")
 
     for m in data:
-        table.add_row(m["name"], m["provider"])
+        table.add_row(m["name"], m.get("display_name") or "", m["provider"])
     console.print(table)
 
 

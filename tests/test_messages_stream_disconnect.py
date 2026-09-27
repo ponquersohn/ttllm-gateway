@@ -79,7 +79,7 @@ async def test_stream_disconnect_drains_provider_and_logs_final_cost(monkeypatch
         id=uuid.uuid4(), name="claude-test", provider_model_id="claude-test", config_json={}
     )
     user = SimpleNamespace(id=uuid.uuid4())
-    response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {})
+    response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {}, {})
 
     iterator = response.body_iterator
     assert await iterator.__anext__() == "event: message_start\ndata: {}\n\n"
@@ -135,7 +135,7 @@ async def test_stream_provider_error_records_audit_row(monkeypatch):
         id=uuid.uuid4(), name="claude-test", provider_model_id="claude-test", config_json={}
     )
     user = SimpleNamespace(id=uuid.uuid4())
-    response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {})
+    response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {}, {})
 
     # Drain the response stream.
     frames = [chunk async for chunk in response.body_iterator]
@@ -179,7 +179,7 @@ async def test_stream_generator_raises_records_audit_row(monkeypatch):
         id=uuid.uuid4(), name="claude-test", provider_model_id="claude-test", config_json={}
     )
     user = SimpleNamespace(id=uuid.uuid4())
-    response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {})
+    response = await _handle_streaming(body, model, user, object(), uuid.uuid4(), {}, {})
 
     frames = [chunk async for chunk in response.body_iterator]
     assert any("event: error" in f and "upstream exploded" in f for f in frames)

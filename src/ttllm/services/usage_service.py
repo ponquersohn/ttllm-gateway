@@ -7,12 +7,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Numeric, cast, func, select
+from sqlalchemy import Numeric, String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ttllm.models.audit import AuditLog
-from ttllm.models.llm_model import LLMModel
-from ttllm.models.user import User
 
 
 def _total_cost_sum():
@@ -72,9 +70,7 @@ async def get_window_aggregate(
     per = per or {}
     model_name = per.get("model")
     if model_name is not None:
-        query = query.join(LLMModel, AuditLog.model_id == LLMModel.id).where(
-            LLMModel.name == model_name
-        )
+        query = query.where(AuditLog.model_name == model_name)
 
     row = (await db.execute(query)).one()
     value = row.value
@@ -137,14 +133,13 @@ async def get_cost_breakdown(
     """
     query = (
         select(
-            LLMModel.name.label("model_name"),
+            AuditLog.model_name.label("model_name"),
             func.count(AuditLog.id).label("request_count"),
             func.sum(AuditLog.input_tokens).label("input_tokens"),
             func.sum(AuditLog.output_tokens).label("output_tokens"),
             _total_cost_sum().label("total_cost"),
         )
-        .join(LLMModel, AuditLog.model_id == LLMModel.id)
-        .group_by(LLMModel.name)
+        .group_by(AuditLog.model_name)
     )
 
     if user_id:
@@ -179,20 +174,28 @@ async def get_user_usage_summary(
     """Get usage summary grouped by user, ordered by total cost descending.
 
     Highest-spending users come first, so passing ``limit`` yields the top N users by cost.
+    Grouped by ``user_email`` (the user's immutable identity, not joined against the live
+    ``users`` row) rather than ``user_id``, mirroring ``get_cost_breakdown``'s grouping by
+    ``model_name`` -- a deleted user's history isn't dropped, and email can't drift
+    underneath the report. ``user_id``/``user_name`` are display columns only (``name`` is
+    still mutable, so ``func.max`` picks an arbitrary one if it actually changed).
     """
     total_cost = _total_cost_sum()
+    user_name = AuditLog.user_snapshot["name"].astext
     query = (
         select(
-            User.id.label("user_id"),
-            User.name.label("user_name"),
-            User.email.label("user_email"),
+            # Postgres has no MAX() aggregate for uuid (only comparison operators, no
+            # built-in aggregate function) -- cast to text first, same as user_id's
+            # eventual str() in the response.
+            func.max(cast(AuditLog.user_id, String)).label("user_id"),
+            func.max(user_name).label("user_name"),
+            AuditLog.user_email.label("user_email"),
             func.count(AuditLog.id).label("request_count"),
             func.sum(AuditLog.input_tokens).label("input_tokens"),
             func.sum(AuditLog.output_tokens).label("output_tokens"),
             total_cost.label("total_cost"),
         )
-        .join(User, AuditLog.user_id == User.id)
-        .group_by(User.id, User.name, User.email)
+        .group_by(AuditLog.user_email)
         .order_by(func.coalesce(total_cost, 0).desc())
     )
 
