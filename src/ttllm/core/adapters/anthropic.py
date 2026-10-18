@@ -8,16 +8,20 @@ Everything downstream (``core/gateway.py``, both providers) only ever sees
 
 from __future__ import annotations
 
+import logging
+import re
 import uuid
 from typing import Any
 
 from ttllm.core.errors import UnsupportedContentError
 from ttllm.core.model import (
+    CacheControl,
     DocumentPart,
     ImagePart,
     InternalMessage,
     InternalRequest,
     InternalResult,
+    InternalUsage,
     Part,
     RedactedThinkingPart,
     ServerToolCallPart,
@@ -38,6 +42,7 @@ from ttllm.schemas.anthropic import (
     ImageSource,
     Message,
     MessagesRequest,
+    CacheCreation,
     MessagesResponse,
     RedactedThinkingBlock,
     ServerToolDefinition,
@@ -56,6 +61,39 @@ from ttllm.schemas.anthropic import (
     DocumentSource,
 )
 
+logger = logging.getLogger(__name__)
+
+# Anthropic's documented default lifetime for an ``ephemeral`` breakpoint without ``ttl``.
+_DEFAULT_CACHE_TTL_SECONDS = 300
+_TTL_RE = re.compile(r"^\s*(\d+)\s*([smh]?)\s*$")
+_TTL_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600}
+
+
+def _cache_control(raw: dict[str, Any] | None) -> CacheControl | None:
+    """Wire ``cache_control`` -> internal ``CacheControl`` with the requested TTL in seconds.
+
+    Accepts ``"5m"``/``"1h"``-style strings (any ``N`` with an ``s``/``m``/``h`` unit) and bare
+    integer seconds. Anything unparseable falls back to the default rather than failing the
+    request -- a cache hint should never be the reason a call is rejected."""
+    if not raw:
+        return None
+    ttl = raw.get("ttl")
+    if ttl is None:
+        return CacheControl(ttl_seconds=_DEFAULT_CACHE_TTL_SECONDS)
+    if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0:
+        return CacheControl(ttl_seconds=ttl)
+    match = _TTL_RE.match(ttl) if isinstance(ttl, str) else None
+    if match and int(match.group(1)) > 0:
+        return CacheControl(ttl_seconds=int(match.group(1)) * _TTL_UNIT_SECONDS[match.group(2)])
+    logger.warning("Unparseable cache_control ttl %r; using %ss", ttl, _DEFAULT_CACHE_TTL_SECONDS)
+    return CacheControl(ttl_seconds=_DEFAULT_CACHE_TTL_SECONDS)
+
+
+def _longest_cache(*controls: CacheControl | None) -> CacheControl | None:
+    """Merge markers promoted onto one breakpoint, keeping the longest requested TTL."""
+    present = [c for c in controls if c is not None]
+    return max(present, key=lambda c: c.ttl_seconds) if present else None
+
 
 def _tool_result_content_to_parts(content: str | list[TextBlock | ImageBlock]) -> list[TextPart | ImagePart]:
     if isinstance(content, str):
@@ -63,25 +101,25 @@ def _tool_result_content_to_parts(content: str | list[TextBlock | ImageBlock]) -
     parts: list[TextPart | ImagePart] = []
     for b in content:
         if isinstance(b, TextBlock):
-            parts.append(TextPart(text=b.text, cache_control=bool(b.cache_control)))
+            parts.append(TextPart(text=b.text, cache_control=_cache_control(b.cache_control)))
         elif isinstance(b, ImageBlock):
             parts.append(ImagePart(media_type=b.source.media_type, data=b.source.data,
-                                    cache_control=bool(b.cache_control)))
+                                    cache_control=_cache_control(b.cache_control)))
     return parts
 
 
 def _block_to_part(block: ContentBlock) -> Part:
     if isinstance(block, TextBlock):
-        return TextPart(text=block.text, cache_control=bool(block.cache_control))
+        return TextPart(text=block.text, cache_control=_cache_control(block.cache_control))
     if isinstance(block, ImageBlock):
         return ImagePart(media_type=block.source.media_type, data=block.source.data,
-                         cache_control=bool(block.cache_control))
+                         cache_control=_cache_control(block.cache_control))
     if isinstance(block, DocumentBlock):
         return DocumentPart(media_type=block.source.media_type, data=block.source.data, title=block.title,
-                            cache_control=bool(block.cache_control))
+                            cache_control=_cache_control(block.cache_control))
     if isinstance(block, ToolUseBlock):
         return ToolCallPart(id=block.id, name=block.name, input=block.input,
-                            cache_control=bool(block.cache_control))
+                            cache_control=_cache_control(block.cache_control))
     if isinstance(block, ToolResultBlock):
         inner = _tool_result_content_to_parts(block.content)
         return ToolResultPart(
@@ -91,7 +129,7 @@ def _block_to_part(block: ContentBlock) -> Part:
             # A marker on the tool_result itself, or on its last inner text block, both mean
             # "cache the prefix through this tool result". Converse cannot place a cachePoint
             # inside toolResult.content, so promote it to the sibling position.
-            cache_control=bool(block.cache_control) or any(p.cache_control for p in inner),
+            cache_control=_longest_cache(_cache_control(block.cache_control), *(p.cache_control for p in inner)),
         )
     if isinstance(block, ThinkingBlock):
         return ThinkingPart(text=block.thinking, signature=block.signature)
@@ -131,7 +169,7 @@ def _flatten_system(request: MessagesRequest) -> list[TextPart] | None:
             parts.append(TextPart(text=request.system))
         else:
             for block in request.system:
-                parts.append(TextPart(text=block.text, cache_control=bool(block.cache_control)))
+                parts.append(TextPart(text=block.text, cache_control=_cache_control(block.cache_control)))
     for msg in request.messages:
         if msg.role == "system":
             text = _message_system_text(msg)
@@ -141,10 +179,13 @@ def _flatten_system(request: MessagesRequest) -> list[TextPart] | None:
                 # ToolResultPart above, since Converse has no way to place a
                 # cachePoint mid-message.
                 inner_cache_control = (
-                    isinstance(msg.content, list)
-                    and any(isinstance(b, TextBlock) and b.cache_control for b in msg.content)
+                    _longest_cache(*(
+                        _cache_control(b.cache_control) for b in msg.content if isinstance(b, TextBlock)
+                    ))
+                    if isinstance(msg.content, list)
+                    else None
                 )
-                parts.append(TextPart(text=text, cache_control=bool(inner_cache_control)))
+                parts.append(TextPart(text=text, cache_control=inner_cache_control))
     return parts or None
 
 
@@ -170,7 +211,7 @@ def _client_tools_to_internal(tools: list[ToolDefinition | ServerToolDefinition]
             name=t.name,
             description=t.description,
             input_schema=t.input_schema.model_dump(),
-            cache_control=bool(t.cache_control),
+            cache_control=_cache_control(t.cache_control),
         )
         for t in tools
         if isinstance(t, ToolDefinition)
@@ -260,6 +301,16 @@ def _part_to_block(part: Part) -> ContentBlock:
     raise AssertionError(f"Unexpected part {type(part).__name__} in a provider result")
 
 
+def cache_creation_breakdown(usage: InternalUsage) -> CacheCreation | None:
+    """Split cache writes into Anthropic's per-TTL ``usage.cache_creation`` buckets."""
+    if not usage.cache_write_tokens:
+        return None
+    return CacheCreation(
+        ephemeral_5m_input_tokens=usage.cache_write_tokens - usage.cache_write_1h_tokens,
+        ephemeral_1h_input_tokens=usage.cache_write_1h_tokens,
+    )
+
+
 def result_to_response(result: InternalResult, model_name: str, request_id: uuid.UUID) -> MessagesResponse:
     """Convert an ``InternalResult`` into the Anthropic ``MessagesResponse`` wire shape."""
     content_blocks = [_part_to_block(p) for p in result.content]
@@ -271,6 +322,7 @@ def result_to_response(result: InternalResult, model_name: str, request_id: uuid
         output_tokens=result.usage.output_tokens,
         cache_read_input_tokens=result.usage.cache_read_tokens or None,
         cache_creation_input_tokens=result.usage.cache_write_tokens or None,
+        cache_creation=cache_creation_breakdown(result.usage),
     )
 
     return MessagesResponse(

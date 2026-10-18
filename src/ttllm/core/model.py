@@ -26,17 +26,27 @@ from pydantic import BaseModel, Discriminator, Tag
 # --- Content parts ---
 
 
+class CacheControl(BaseModel):
+    """A cache breakpoint: cache the prefix up to and including the marked element.
+
+    ``ttl_seconds`` is the lifetime the client asked for, verbatim. Each provider rounds it
+    onto whatever tiers it actually offers (e.g. Bedrock: 5m or 1h).
+    """
+
+    ttl_seconds: int
+
+
 class TextPart(BaseModel):
     type: Literal["text"] = "text"
     text: str
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class ImagePart(BaseModel):
     type: Literal["image"] = "image"
     media_type: str
     data: str
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class DocumentPart(BaseModel):
@@ -44,7 +54,7 @@ class DocumentPart(BaseModel):
     media_type: str
     data: str
     title: str | None = None
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class ToolCallPart(BaseModel):
@@ -52,7 +62,7 @@ class ToolCallPart(BaseModel):
     id: str
     name: str
     input: dict[str, Any]
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class ToolResultPart(BaseModel):
@@ -60,20 +70,20 @@ class ToolResultPart(BaseModel):
     tool_call_id: str
     content: list[TextPart | ImagePart]
     is_error: bool = False
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class ThinkingPart(BaseModel):
     type: Literal["thinking"] = "thinking"
     text: str
     signature: str
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class RedactedThinkingPart(BaseModel):
     type: Literal["redacted_thinking"] = "redacted_thinking"
     data: str
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class ServerToolCallPart(BaseModel):
@@ -86,14 +96,14 @@ class ServerToolCallPart(BaseModel):
     id: str
     name: str
     input: dict[str, Any]
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class ServerToolResultPart(BaseModel):
     type: Literal["server_tool_result"] = "server_tool_result"
     tool_call_id: str
     content: list[Any] = []
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 def _get_part_type(v: Any) -> str:
@@ -130,7 +140,7 @@ class ToolSpec(BaseModel):
     name: str
     description: str = ""
     input_schema: dict[str, Any]
-    cache_control: bool = False
+    cache_control: CacheControl | None = None
 
 
 class ServerToolSpec(BaseModel):
@@ -185,6 +195,8 @@ class InternalUsage(BaseModel):
     output_tokens: int
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # Subset of cache_write_tokens written at the provider's long-TTL tier (1h on Bedrock).
+    cache_write_1h_tokens: int = 0
 
 
 class InternalResult(BaseModel):

@@ -9,7 +9,14 @@ import pytest
 
 from ttllm.core.adapters.anthropic import request_to_internal, result_to_response
 from ttllm.core.errors import UnsupportedContentError
-from ttllm.core.model import InternalResult, InternalUsage, TextPart, ThinkingPart, ToolCallPart
+from ttllm.core.model import (
+    CacheControl,
+    InternalResult,
+    InternalUsage,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+)
 from ttllm.schemas.anthropic import (
     DocumentBlock,
     DocumentSource,
@@ -31,6 +38,9 @@ from ttllm.schemas.anthropic import (
     ToolUseBlock,
     WebSearchToolResultBlock,
 )
+
+
+_CC_5M = CacheControl(ttl_seconds=300)
 
 
 def _make_model(**overrides):
@@ -132,7 +142,7 @@ class TestRequestToInternal:
             _make_request(system=[TextBlock(text="prefix", cache_control={"type": "ephemeral"})]),
             _make_model(),
         )
-        assert internal.system == [TextPart(text="prefix", cache_control=True)]
+        assert internal.system == [TextPart(text="prefix", cache_control=_CC_5M)]
 
     def test_system_cache_boundary_preserved_across_blocks(self):
         """The bug this guards against: a cached top-level block followed by an
@@ -149,8 +159,8 @@ class TestRequestToInternal:
             _make_model(),
         )
         assert internal.system == [
-            TextPart(text="static instructions", cache_control=True),
-            TextPart(text="dynamic per-request tail", cache_control=False),
+            TextPart(text="static instructions", cache_control=_CC_5M),
+            TextPart(text="dynamic per-request tail", cache_control=None),
         ]
 
     def test_mid_conversation_system_lifted(self):
@@ -192,8 +202,8 @@ class TestRequestToInternal:
         )
         internal = request_to_internal(request, _make_model())
         assert internal.system == [
-            TextPart(text="Base prompt.", cache_control=True),
-            TextPart(text="Switch to JSON output.", cache_control=False),
+            TextPart(text="Base prompt.", cache_control=_CC_5M),
+            TextPart(text="Switch to JSON output.", cache_control=None),
         ]
 
     def test_system_message_block_content_flattened(self):
@@ -306,7 +316,7 @@ class TestRequestToInternal:
         ]
         internal = request_to_internal(_make_request(tools=tools), _make_model())
         assert internal.tools[0].name == "search"
-        assert internal.tools[0].cache_control is True
+        assert internal.tools[0].cache_control == _CC_5M
         assert internal.tools[0].input_schema["properties"] == {"q": {"type": "string"}}
 
     def test_thinking_config(self):
@@ -405,3 +415,58 @@ class TestSafeguards:
             safeguard_results=results,
         )
         assert result_to_response(result, "claude-sonnet", uuid.uuid4()).safeguard_results == results
+
+
+class TestCacheControlTtl:
+    @pytest.mark.parametrize(
+        ("wire", "seconds"),
+        [
+            ({"type": "ephemeral"}, 300),
+            ({"type": "ephemeral", "ttl": "5m"}, 300),
+            ({"type": "ephemeral", "ttl": "1h"}, 3600),
+            ({"type": "ephemeral", "ttl": "31m"}, 1860),
+            ({"type": "ephemeral", "ttl": "2h"}, 7200),
+            ({"type": "ephemeral", "ttl": "90s"}, 90),
+            ({"type": "ephemeral", "ttl": 600}, 600),
+            ({"type": "ephemeral", "ttl": "forever"}, 300),
+            ({"type": "ephemeral", "ttl": "0m"}, 300),
+        ],
+    )
+    def test_ttl_parsed_to_seconds(self, wire, seconds):
+        internal = request_to_internal(
+            _make_request(system=[TextBlock(text="prefix", cache_control=wire)]), _make_model()
+        )
+        assert internal.system[0].cache_control == CacheControl(ttl_seconds=seconds)
+
+    def test_promoted_tool_result_marker_keeps_longest_ttl(self):
+        req = _make_request(messages=[
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "t1",
+                "cache_control": {"type": "ephemeral"},
+                "content": [{"type": "text", "text": "out", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            }]},
+        ])
+        internal = request_to_internal(req, _make_model())
+        assert internal.messages[2].content[0].cache_control == CacheControl(ttl_seconds=3600)
+
+
+class TestCacheCreationUsage:
+    def test_response_reports_cache_writes_per_ttl(self):
+        result = InternalResult(
+            content=[TextPart(text="ok")],
+            stop_reason="end_turn",
+            usage=InternalUsage(input_tokens=1, output_tokens=1, cache_write_tokens=1500, cache_write_1h_tokens=1000),
+        )
+        usage = result_to_response(result, "m", uuid.uuid4()).usage
+        assert usage.cache_creation_input_tokens == 1500
+        assert usage.cache_creation.ephemeral_5m_input_tokens == 500
+        assert usage.cache_creation.ephemeral_1h_input_tokens == 1000
+
+    def test_no_cache_writes_omits_breakdown(self):
+        result = InternalResult(
+            content=[TextPart(text="ok")], stop_reason="end_turn",
+            usage=InternalUsage(input_tokens=1, output_tokens=1),
+        )
+        assert result_to_response(result, "m", uuid.uuid4()).usage.cache_creation is None

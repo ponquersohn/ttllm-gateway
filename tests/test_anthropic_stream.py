@@ -140,3 +140,19 @@ class TestSafeguardResults:
         ])
         delta = _parse_sse(next(e for e in collected if e.startswith("event: message_delta")))[1]["delta"]
         assert "safeguard_results" not in delta
+
+
+class TestStreamCacheCreation:
+    @pytest.mark.asyncio
+    async def test_message_delta_reports_cache_writes_per_ttl(self):
+        collected = await _collect([
+            InternalChunk(
+                kind=ChunkKind.MESSAGE_STOP, stop_reason="end_turn",
+                usage=InternalUsage(input_tokens=1, output_tokens=1, cache_write_tokens=40, cache_write_1h_tokens=30),
+            ),
+        ])
+        message_delta = _parse_sse(next(e for e in collected if e.startswith("event: message_delta")))[1]
+        assert message_delta["usage"]["cache_creation_input_tokens"] == 40
+        assert message_delta["usage"]["cache_creation"] == {
+            "ephemeral_5m_input_tokens": 10, "ephemeral_1h_input_tokens": 30,
+        }

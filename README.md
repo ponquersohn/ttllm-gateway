@@ -477,7 +477,7 @@ ttllm models create \
 ```
 
 - `--input-cost` / `--output-cost` — price per 1K fresh input and output tokens.
-- `--cache-read-cost` / `--cache-write-cost` — price per 1K prompt-cache read and write tokens (Bedrock). Cache-read tokens are billed at this rate **instead of** the input rate, not in addition to it. Defaults to `0` when unset, so existing models bill cache reads at no extra cost until prices are configured.
+- `--cache-read-cost` / `--cache-write-cost` — price per 1K prompt-cache read and write tokens (Bedrock). Cache-read tokens are billed at this rate **instead of** the input rate, not in addition to it. Defaults to `0` when unset, so existing models bill cache reads at no extra cost until prices are configured. `--cache-write-cost` is the 5-minute write rate; when a client asks for a cache TTL over 30 minutes (`cache_control.ttl`, e.g. `"1h"`), Bedrock caches for 1 hour and those writes are billed at 2× `--input-cost`.
 
 All four are also accepted by `ttllm models update` with the same flags.
 

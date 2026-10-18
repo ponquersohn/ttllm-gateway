@@ -10,6 +10,7 @@ import pytest
 from ttllm.core.providers.bedrock.converse import build_converse_request, parse_converse_response
 from ttllm.core.errors import ServerToolError
 from ttllm.core.model import (
+    CacheControl,
     ChunkKind,
     DocumentPart,
     ImagePart,
@@ -29,6 +30,9 @@ from ttllm.core.model import (
 )
 
 
+_CC_5M = CacheControl(ttl_seconds=300)
+
+
 def _make_model(**overrides):
     model = MagicMock()
     model.provider = "bedrock"
@@ -38,6 +42,9 @@ def _make_model(**overrides):
     for k, v in overrides.items():
         setattr(model, k, v)
     return model
+
+
+_SEARCH_TOOL = [ToolSpec(name="search", input_schema={"type": "object", "properties": {}})]
 
 
 def _make_request(**kwargs) -> InternalRequest:
@@ -70,7 +77,7 @@ class TestBuildConverseRequest:
         assert result["system"] == [{"text": "Be helpful."}]
 
     def test_system_cache_control(self):
-        request = _make_request(system=[TextPart(text="Big shared prefix.", cache_control=True)])
+        request = _make_request(system=[TextPart(text="Big shared prefix.", cache_control=_CC_5M)])
         result = build_converse_request(request, _make_model())
 
         assert result["system"] == [
@@ -84,7 +91,7 @@ class TestBuildConverseRequest:
         folded into the same cached span and never hits cache twice in a row."""
         request = _make_request(
             system=[
-                TextPart(text="static instructions", cache_control=True),
+                TextPart(text="static instructions", cache_control=_CC_5M),
                 TextPart(text="dynamic per-request tail"),
             ]
         )
@@ -182,7 +189,7 @@ class TestBuildConverseRequest:
                 content=[ToolCallPart(id="tu_123", name="search", input={"q": "test"})],
             )
         ]
-        request = _make_request(messages=messages)
+        request = _make_request(messages=messages, tools=_SEARCH_TOOL)
         model = _make_model()
         result = build_converse_request(request, model)
 
@@ -204,7 +211,7 @@ class TestBuildConverseRequest:
                 ],
             )
         ]
-        request = _make_request(messages=messages)
+        request = _make_request(messages=messages, tools=_SEARCH_TOOL)
         model = _make_model()
         result = build_converse_request(request, model)
 
@@ -222,7 +229,7 @@ class TestBuildConverseRequest:
                 ],
             )
         ]
-        request = _make_request(messages=messages)
+        request = _make_request(messages=messages, tools=_SEARCH_TOOL)
         model = _make_model()
         result = build_converse_request(request, model)
 
@@ -244,7 +251,7 @@ class TestBuildConverseRequest:
                 ],
             )
         ]
-        result = build_converse_request(_make_request(messages=messages), _make_model())
+        result = build_converse_request(_make_request(messages=messages, tools=_SEARCH_TOOL), _make_model())
         tr_content = result["messages"][0]["content"][0]["toolResult"]["content"]
 
         assert tr_content[0] == {"text": "see image"}
@@ -584,6 +591,48 @@ class TestToolChoice:
 
         assert result["toolConfig"]["toolChoice"] == {"tool": {"name": "search"}}
 
+    def _tool_history(self):
+        return [
+            InternalMessage(role="user", content=[TextPart(text="Look it up")]),
+            InternalMessage(
+                role="assistant",
+                content=[ToolCallPart(id="toolu_1", name="search", input={"q": "x"})],
+            ),
+            InternalMessage(
+                role="user",
+                content=[ToolResultPart(tool_call_id="toolu_1", content=[TextPart(text="found")])],
+            ),
+        ]
+
+    def test_tool_history_without_tools_is_flattened_to_text(self):
+        request = _make_request(messages=self._tool_history())
+        result = build_converse_request(request, _make_model())
+
+        assert "toolConfig" not in result
+        blocks = [b for m in result["messages"] for b in m["content"]]
+        assert not any("toolUse" in b or "toolResult" in b for b in blocks)
+        assert result["messages"][1]["content"] == [{"text": '[tool_use: search({"q": "x"})]'}]
+        assert result["messages"][2]["content"] == [{"text": "[tool_result:]"}, {"text": "found"}]
+
+    def test_tool_history_with_tool_choice_none_is_flattened(self):
+        tools = [ToolSpec(name="search", input_schema={"type": "object", "properties": {}})]
+        request = _make_request(
+            messages=self._tool_history(), tools=tools, tool_choice=ToolChoice(mode="none")
+        )
+        result = build_converse_request(request, _make_model())
+
+        assert "toolConfig" not in result
+        blocks = [b for m in result["messages"] for b in m["content"]]
+        assert not any("toolUse" in b or "toolResult" in b for b in blocks)
+
+    def test_tool_history_with_tools_stays_native(self):
+        tools = [ToolSpec(name="search", input_schema={"type": "object", "properties": {}})]
+        request = _make_request(messages=self._tool_history(), tools=tools)
+        result = build_converse_request(request, _make_model())
+
+        assert "toolUse" in result["messages"][1]["content"][0]
+        assert "toolResult" in result["messages"][2]["content"][0]
+
     def test_tool_choice_unset_keeps_tools_without_choice(self):
         tools = [ToolSpec(name="search", input_schema={"type": "object", "properties": {}})]
         request = _make_request(tools=tools)
@@ -904,7 +953,7 @@ class TestCachePoint:
                 name="search",
                 description="Search",
                 input_schema={"type": "object", "properties": {}},
-                cache_control=True,
+                cache_control=_CC_5M,
             ),
         ]
         request = _make_request(tools=tools)
@@ -920,7 +969,7 @@ class TestCachePoint:
             InternalMessage(
                 role="user",
                 content=[
-                    TextPart(text="Cache me.", cache_control=True),
+                    TextPart(text="Cache me.", cache_control=_CC_5M),
                     TextPart(text="But not me."),
                 ],
             )
@@ -961,6 +1010,7 @@ class TestToolResultCacheControl:
         return {
             "model": "claude-sonnet",
             "max_tokens": 16,
+            "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {}}}],
             "messages": [
                 {"role": "user", "content": "q"},
                 {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
@@ -1129,3 +1179,64 @@ class TestSafeguards:
         assert list(stop.safeguard_results[0]["status"]["tool_uses"]) == ["tooluse_A"]
         assert state.get_response().safeguard_results == stop.safeguard_results
         assert state.get_metadata()["safeguard_results"] == stop.safeguard_results
+
+
+class TestCacheTtl:
+    """A client's requested cache TTL (in seconds, internally) rounds deterministically onto
+    Bedrock's two tiers: up to 30 minutes -> 5m, anything longer -> 1h (Bedrock's maximum)."""
+
+    @pytest.mark.parametrize("seconds", [60, 300, 900, 1800])
+    def test_short_ttl_maps_to_plain_5m_cache_point(self, seconds):
+        part = TextPart(text="Big shared prefix.", cache_control=CacheControl(ttl_seconds=seconds))
+        result = build_converse_request(_make_request(system=[part]), _make_model())
+        assert result["system"][1] == {"cachePoint": {"type": "default"}}
+
+    @pytest.mark.parametrize("seconds", [1801, 1860, 3600, 7200])
+    def test_long_ttl_maps_to_1h_cache_point(self, seconds):
+        part = TextPart(text="Big shared prefix.", cache_control=CacheControl(ttl_seconds=seconds))
+        result = build_converse_request(_make_request(system=[part]), _make_model())
+        assert result["system"][1] == {"cachePoint": {"type": "default", "ttl": "1h"}}
+
+    def test_ttl_applies_to_tools_and_messages(self):
+        cc_1h = CacheControl(ttl_seconds=3600)
+        tools = [ToolSpec(name="search", input_schema={"type": "object"}, cache_control=cc_1h)]
+        messages = [InternalMessage(role="user", content=[TextPart(text="Hi", cache_control=cc_1h)])]
+        result = build_converse_request(_make_request(tools=tools, messages=messages), _make_model())
+        assert result["toolConfig"]["tools"][1] == {"cachePoint": {"type": "default", "ttl": "1h"}}
+        assert result["messages"][0]["content"][1] == {"cachePoint": {"type": "default", "ttl": "1h"}}
+
+    def test_parse_response_splits_1h_cache_writes(self):
+        response = {
+            "output": {"message": {"role": "assistant", "content": [{"text": "ok"}]}},
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 10, "outputTokens": 5, "cacheWriteInputTokens": 1500,
+                "cacheDetails": [{"ttl": "1h", "inputTokens": 1000}, {"ttl": "5m", "inputTokens": 500}],
+            },
+        }
+        usage = parse_converse_response(response).usage
+        assert usage.cache_write_tokens == 1500
+        assert usage.cache_write_1h_tokens == 1000
+
+    @pytest.mark.asyncio
+    async def test_stream_splits_1h_cache_writes(self):
+        from ttllm.core.providers.bedrock.converse import stream_converse_chunks
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Hi"}}},
+            {"messageStop": {"stopReason": "end_turn"}},
+            {"metadata": {"usage": {
+                "inputTokens": 100, "outputTokens": 40, "cacheWriteInputTokens": 30,
+                "cacheDetails": [{"ttl": "1h", "inputTokens": 30}],
+            }}},
+        ]
+        with patch("ttllm.core.providers.bedrock.converse.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+            collected = [c async for c in stream_converse_chunks(_make_request(), _make_model(), uuid.uuid4())]
+
+        stop = next(c for c in collected if c.kind == ChunkKind.MESSAGE_STOP)
+        assert stop.usage.cache_write_tokens == 30
+        assert stop.usage.cache_write_1h_tokens == 30

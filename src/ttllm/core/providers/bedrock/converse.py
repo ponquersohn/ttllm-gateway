@@ -22,6 +22,7 @@ from botocore.config import Config as BotocoreConfig
 from ttllm.config import settings
 from ttllm.core.errors import ServerToolError
 from ttllm.core.model import (
+    CacheControl,
     ChunkKind,
     DocumentPart,
     ImagePart,
@@ -59,14 +60,28 @@ _DEFAULT_MAX_ATTEMPTS = 3
 _BEDROCK_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="bedrock")
 
 
-def _cache_point() -> dict[str, Any]:
+# Bedrock offers exactly two cache lifetimes. A requested TTL up to this bound is served
+# by the 5m tier; anything longer gets 1h (Bedrock's maximum).
+_CACHE_TTL_5M_MAX_SECONDS = 1800
+
+
+def _cache_point(cache_control: CacheControl) -> dict[str, Any]:
     """Bedrock Converse cache breakpoint marker.
 
     Inserted as a sibling element immediately after the block that carried an internal
     ``cache_control`` marker, telling Bedrock to cache the prefix up to and including
-    that block.
+    that block. The requested TTL is rounded to the nearest tier Bedrock offers: 5m for
+    up to 30 minutes, 1h above that. The 5m form omits ``ttl`` so it stays byte-identical
+    to what earlier gateway versions sent.
     """
+    if cache_control.ttl_seconds > _CACHE_TTL_5M_MAX_SECONDS:
+        return {"cachePoint": {"type": "default", "ttl": "1h"}}
     return {"cachePoint": {"type": "default"}}
+
+
+def _cache_write_1h_tokens(usage: dict[str, Any]) -> int:
+    """Cache-write tokens Bedrock reports under the 1h TTL (``usage.cacheDetails``)."""
+    return sum(d.get("inputTokens", 0) for d in usage.get("cacheDetails") or [] if d.get("ttl") == "1h")
 
 
 def get_boto3_client(llm_model: Any) -> Any:
@@ -171,14 +186,36 @@ def _convert_part_to_bedrock(part: Part) -> dict[str, Any] | None:
     return {"text": str(part)}
 
 
-def _convert_message_to_bedrock(msg: InternalMessage) -> dict[str, Any]:
+def _flatten_tool_part(part: ToolCallPart | ToolResultPart) -> list[dict[str, Any]]:
+    """Render a tool call/result as plain content blocks.
+
+    Converse rejects toolUse/toolResult blocks unless the request carries a
+    toolConfig, so a conversation with tool history but no tools (or
+    tool_choice "none") gets its tool turns emulated as text instead.
+    """
+    if isinstance(part, ToolCallPart):
+        return [{"text": f"[tool_use: {part.name}({json.dumps(part.input)})]"}]
+    status = " (error)" if part.is_error else ""
+    blocks: list[dict[str, Any]] = [{"text": f"[tool_result{status}:]"}]
+    blocks.extend(_tool_result_content_to_bedrock(part.content))
+    return blocks
+
+
+def _convert_message_to_bedrock(
+    msg: InternalMessage, *, flatten_tools: bool = False
+) -> dict[str, Any]:
     content_parts: list[dict[str, Any]] = []
     for part in msg.content:
+        if flatten_tools and isinstance(part, (ToolCallPart, ToolResultPart)):
+            content_parts.extend(_flatten_tool_part(part))
+            if part.cache_control:
+                content_parts.append(_cache_point(part.cache_control))
+            continue
         converted = _convert_part_to_bedrock(part)
         if converted is not None:
             content_parts.append(converted)
             if part.cache_control:
-                content_parts.append(_cache_point())
+                content_parts.append(_cache_point(part.cache_control))
 
     return {"role": msg.role, "content": content_parts}
 
@@ -196,7 +233,7 @@ def _convert_tools_to_bedrock(tools: list[ToolSpec]) -> list[dict[str, Any]]:
         spec["toolSpec"]["inputSchema"] = {"json": input_schema}
         tool_specs.append(spec)
         if tool.cache_control:
-            tool_specs.append(_cache_point())
+            tool_specs.append(_cache_point(tool.cache_control))
     return tool_specs
 
 
@@ -262,15 +299,24 @@ def build_converse_request(
             "Remove server tool definitions and handle them client-side."
         )
 
+    # Bedrock Converse has no "none" toolChoice. To forbid tool calls, omit
+    # toolConfig entirely so the model has no tools to call.
+    send_tools = bool(request.tools) and not (
+        request.tool_choice and request.tool_choice.mode == "none"
+    )
+
     params: dict[str, Any] = {"modelId": llm_model.provider_model_id}
-    params["messages"] = [_convert_message_to_bedrock(msg) for msg in request.messages]
+    params["messages"] = [
+        _convert_message_to_bedrock(msg, flatten_tools=not send_tools)
+        for msg in request.messages
+    ]
 
     if request.system:
         system_blocks: list[dict[str, Any]] = []
         for part in request.system:
             system_blocks.append({"text": part.text})
             if part.cache_control:
-                system_blocks.append(_cache_point())
+                system_blocks.append(_cache_point(part.cache_control))
         params["system"] = system_blocks
 
     inference_config: dict[str, Any] = {"maxTokens": request.max_tokens}
@@ -282,20 +328,17 @@ def build_converse_request(
         inference_config["stopSequences"] = request.stop_sequences
     params["inferenceConfig"] = inference_config
 
-    if request.tools:
-        # Bedrock Converse has no "none" toolChoice. To forbid tool calls, omit
-        # toolConfig entirely so the model has no tools to call.
-        if not (request.tool_choice and request.tool_choice.mode == "none"):
-            tool_config: dict[str, Any] = {"tools": _convert_tools_to_bedrock(request.tools)}
-            if request.tool_choice:
-                mode = request.tool_choice.mode
-                if mode == "auto":
-                    tool_config["toolChoice"] = {"auto": {}}
-                elif mode == "any":
-                    tool_config["toolChoice"] = {"any": {}}
-                elif mode == "tool":
-                    tool_config["toolChoice"] = {"tool": {"name": request.tool_choice.tool_name}}
-            params["toolConfig"] = tool_config
+    if send_tools:
+        tool_config: dict[str, Any] = {"tools": _convert_tools_to_bedrock(request.tools)}
+        if request.tool_choice:
+            mode = request.tool_choice.mode
+            if mode == "auto":
+                tool_config["toolChoice"] = {"auto": {}}
+            elif mode == "any":
+                tool_config["toolChoice"] = {"any": {}}
+            elif mode == "tool":
+                tool_config["toolChoice"] = {"tool": {"name": request.tool_choice.tool_name}}
+        params["toolConfig"] = tool_config
 
     additional_fields: dict[str, Any] = {}
     if request.top_k is not None:
@@ -396,6 +439,7 @@ def parse_converse_response(response: dict[str, Any]) -> InternalResult:
         output_tokens=usage_data.get("outputTokens", 0),
         cache_read_tokens=usage_data.get("cacheReadInputTokens", 0),
         cache_write_tokens=usage_data.get("cacheWriteInputTokens", 0),
+        cache_write_1h_tokens=_cache_write_1h_tokens(usage_data),
     )
 
     safeguard_results = response.get("additionalModelResponseFields", {}).get("safeguard_results")
@@ -490,6 +534,7 @@ async def stream_converse_chunks(
     output_tokens = 0
     cache_read = 0
     cache_write = 0
+    cache_write_1h = 0
     raw_usage: dict[str, Any] = {}
     stop_reason = "end_turn"
     raw_safeguard_results: list[dict[str, Any]] | None = None
@@ -581,6 +626,7 @@ async def stream_converse_chunks(
                 output_tokens = usage.get("outputTokens", 0)
                 cache_read = usage.get("cacheReadInputTokens", 0)
                 cache_write = usage.get("cacheWriteInputTokens", 0)
+                cache_write_1h = _cache_write_1h_tokens(usage)
     except Exception as exc:
         logger.exception("Bedrock stream failed for request %s", request_id)
         if state is not None:
@@ -595,6 +641,7 @@ async def stream_converse_chunks(
             state.output_tokens = output_tokens
             state.cache_read_tokens = cache_read
             state.cache_write_tokens = cache_write
+            state.cache_write_1h_tokens = cache_write_1h
             state.raw_usage = raw_usage
             state.stop_reason = stop_reason
             state.content_parts = parts
@@ -615,5 +662,6 @@ async def stream_converse_chunks(
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
+            cache_write_1h_tokens=cache_write_1h,
         ),
     )
