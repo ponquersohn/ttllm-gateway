@@ -58,12 +58,25 @@ are handled, and it decays fast if left to comments scattered across provider fi
 | `ServerToolCallPart` | `id`, `name`, `input` (dict), `cache_control` | A server-side tool invocation (e.g. Anthropic's built-in web_search). |
 | `ServerToolResultPart` | `tool_call_id`, `content` (untyped list), `cache_control` | |
 
-`cache_control` is a plain bool on every part. The Anthropic input adapter sets it from the
-wire `cache_control` field on text, image, document, tool_use and tool_result blocks (the
-Anthropic API accepts the marker on all of these, plus system and tools; agentic clients such
-as Claude Code place it on the last tool_result of each turn), and only the Bedrock provider
-currently acts on it (emitting a sibling `cachePoint`). A provider that doesn't support caching simply ignores the flag
-— that's a safe no-op, not a lossy drop, unlike the content types below.
+`cache_control` on every part (and on `ToolSpec`) is `CacheControl | None`, where
+`CacheControl.ttl_seconds` is the lifetime the client asked for, in seconds. The Anthropic input
+adapter sets it from the wire `cache_control` field on text, image, document, tool_use and
+tool_result blocks (the Anthropic API accepts the marker on all of these, plus system and tools;
+agentic clients such as Claude Code place it on the last tool_result of each turn). Wire `ttl`
+parsing: absent → 300 (Anthropic's default); `"<N>s|m|h"` (e.g. `"5m"`, `"31m"`, `"1h"`, `"2h"`) or a
+bare integer → that many seconds; anything unparseable → 300 with a logged warning, never an error.
+Where several markers are promoted onto one breakpoint (a tool_result's inner blocks, a
+mid-conversation system message), the longest TTL wins.
+
+Only the Bedrock provider currently acts on it, emitting a sibling `cachePoint` and rounding the TTL
+onto the two tiers Bedrock offers: **≤ 1800s → 5m** (`{"type": "default"}`, the same bytes as before
+TTL support) and **> 1800s → 1h** (`{"type": "default", "ttl": "1h"}`; longer requests are capped at
+1h). Bedrock's `usage.cacheDetails` reports writes per TTL, so the result carries
+`InternalUsage.cache_write_1h_tokens`. The 1h writes are billed at 2× `input_cost_per_1k` (the
+Anthropic 1h-write multiplier; there's no separate price column) as the `cache_write_1h` cost
+component, and they surface on the wire as `usage.cache_creation.ephemeral_1h_input_tokens`. A
+provider that doesn't support caching simply ignores the marker — that's a safe no-op, not a lossy
+drop, unlike the content types below.
 
 **Server-side tool content gets a real `Part`/spec, not a blanket exclusion.** It would be
 tempting to reject `server_tool_call`/`server_tool_result` at the input-adapter boundary
@@ -172,6 +185,7 @@ below are deliberate exceptions because there is no real content being lost.
 | Part | Handling |
 |---|---|
 | `TextPart`, `ImagePart`, `DocumentPart`, `ToolCallPart`, `ToolResultPart`, `ThinkingPart` | Full native support (Bedrock Converse has direct equivalents for all of these). |
+| `ToolCallPart`, `ToolResultPart` when no `toolConfig` is sent (no `tools`, or `tool_choice` `"none"`) | **Emulate.** Converse rejects `toolUse`/`toolResult` blocks without a `toolConfig` (`400 The toolConfig field must be defined…`), so these become text: `[tool_use: name({json input})]` and `[tool_result:]` (or `[tool_result (error):]`) followed by the result's text/image blocks. Clients such as Claude Code's hook evaluator send tool history with no tools attached. |
 | `RedactedThinkingPart` | **Silent drop.** Bedrock has no equivalent, and there's nothing to emulate — the payload is opaque even to Anthropic. This is the one deliberate exception to "always emulate or error." |
 | `ServerToolCallPart`, `ServerToolResultPart`, non-empty `server_tools` | **Error** (`ServerToolError`, mapped to HTTP 501 `not_implemented_error`). Bedrock Converse has no mechanism to proxy server-side tools. |
 

@@ -18,6 +18,11 @@ from ttllm.core.providers.base import BaseProvider, ProviderState
 from ttllm.core.providers.bedrock import converse as bedrock
 
 
+# Anthropic bills 1h cache writes at 2x the base input rate (5m writes are 1.25x and have
+# their own per-model price column). There's no separate 1h price column, so derive it.
+_CACHE_WRITE_1H_MULTIPLIER = Decimal("2")
+
+
 def _cost(tokens: int, rate: Any) -> Decimal:
     return (Decimal(tokens) / 1000) * Decimal(str(rate or 0))
 
@@ -32,6 +37,8 @@ class BedrockState(ProviderState):
         self.output_tokens = 0
         self.cache_read_tokens = 0
         self.cache_write_tokens = 0
+        # Subset of cache_write_tokens written with the 1h TTL.
+        self.cache_write_1h_tokens = 0
         self.raw_usage: dict[str, Any] = {}
         self.stop_reason = "end_turn"
         self.content_parts: list[Part] = []
@@ -50,7 +57,14 @@ class BedrockState(ProviderState):
             "input": _cost(self.input_tokens, m.input_cost_per_1k),
             "output": _cost(self.output_tokens, m.output_cost_per_1k),
             "cache_read": _cost(self.cache_read_tokens, getattr(m, "cache_read_cost_per_1k", 0)),
-            "cache_write": _cost(self.cache_write_tokens, getattr(m, "cache_write_cost_per_1k", 0)),
+            "cache_write": _cost(
+                self.cache_write_tokens - self.cache_write_1h_tokens,
+                getattr(m, "cache_write_cost_per_1k", 0),
+            ),
+            "cache_write_1h": _cost(
+                self.cache_write_1h_tokens,
+                Decimal(str(m.input_cost_per_1k or 0)) * _CACHE_WRITE_1H_MULTIPLIER,
+            ),
         }
 
     def get_cost(self) -> Decimal:
@@ -74,6 +88,7 @@ class BedrockState(ProviderState):
                     "output": self.output_tokens,
                     "cache_read": self.cache_read_tokens,
                     "cache_write": self.cache_write_tokens,
+                    "cache_write_1h": self.cache_write_1h_tokens,
                 },
             },
         }
@@ -88,6 +103,7 @@ class BedrockState(ProviderState):
                 output_tokens=self.output_tokens,
                 cache_read_tokens=self.cache_read_tokens,
                 cache_write_tokens=self.cache_write_tokens,
+                cache_write_1h_tokens=self.cache_write_1h_tokens,
             ),
             safeguard_results=self.safeguard_results,
         )
@@ -106,6 +122,7 @@ class BedrockProvider(BaseProvider):
         state.output_tokens = result.usage.output_tokens
         state.cache_read_tokens = result.usage.cache_read_tokens
         state.cache_write_tokens = result.usage.cache_write_tokens
+        state.cache_write_1h_tokens = result.usage.cache_write_1h_tokens
         state.raw_usage = raw.get("usage", {})
         state.stop_reason = result.stop_reason
         state.content_parts = list(result.content)

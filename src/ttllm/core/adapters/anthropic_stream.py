@@ -21,7 +21,7 @@ import json
 import uuid
 from typing import Any, AsyncIterator
 
-from ttllm.core.adapters.anthropic import _part_to_block
+from ttllm.core.adapters.anthropic import _part_to_block, cache_creation_breakdown
 from ttllm.core.model import ChunkKind, InternalChunk
 from ttllm.schemas.anthropic import MessagesResponse, Usage
 
@@ -107,6 +107,9 @@ async def encode_anthropic_sse(
                     "cache_read_input_tokens": chunk.usage.cache_read_tokens or None,
                     "cache_creation_input_tokens": chunk.usage.cache_write_tokens or None,
                 }
+                cache_creation = cache_creation_breakdown(chunk.usage)
+                if cache_creation:
+                    usage_dict["cache_creation"] = cache_creation.model_dump()
 
         elif chunk.kind == ChunkKind.ERROR:
             yield _sse_event("error", {

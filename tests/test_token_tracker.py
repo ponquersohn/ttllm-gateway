@@ -79,7 +79,7 @@ class TestBedrockStateCost:
         meta = state.get_metadata()
         assert meta["provider"] == "bedrock"
         assert meta["raw"] == {"inputTokens": 1000}
-        assert set(meta["cost"]["components"]) == {"input", "output", "cache_read", "cache_write"}
+        assert set(meta["cost"]["components"]) == {"input", "output", "cache_read", "cache_write", "cache_write_1h"}
         assert meta["cost"]["total"] == str(state.get_cost())
         assert meta["cost"]["tokens"]["cache_read"] == 2000
 
@@ -113,3 +113,22 @@ class TestReadTokenCounts:
     def test_no_metadata(self):
         msg = AIMessage(content="test")
         assert _read_token_counts(msg) == (0, 0)
+
+
+class TestBedrockCacheWrite1hCost:
+    def test_1h_writes_billed_at_twice_input_rate(self):
+        model = _Pricing(
+            input_cost_per_1k=Decimal("0.004"),
+            output_cost_per_1k=Decimal("0.02"),
+            cache_read_cost_per_1k=Decimal("0.0004"),
+            cache_write_cost_per_1k=Decimal("0.005"),
+        )
+        state = BedrockState(model, uuid.uuid4())
+        state.cache_write_tokens = 3000
+        state.cache_write_1h_tokens = 1000
+
+        components = state.get_metadata()["cost"]["components"]
+        assert Decimal(components["cache_write"]) == (Decimal("2000") / 1000) * Decimal("0.005")
+        assert Decimal(components["cache_write_1h"]) == (Decimal("1000") / 1000) * Decimal("0.008")
+        assert state.get_cost() == Decimal("0.010") + Decimal("0.008")
+        assert state.get_response().usage.cache_write_1h_tokens == 1000

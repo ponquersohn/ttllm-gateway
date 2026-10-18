@@ -123,7 +123,7 @@ class TTLLMClient(httpx.Client):
         if not session or not session.get("refresh_token"):
             return resp
         refresh_resp = httpx.post(
-            f"{self.base_url}auth/token/refresh",
+            f"{self.base_url}/auth/token/refresh",
             json={"refresh_token": session["refresh_token"]},
             timeout=10,
             verify=ssl_context(),
