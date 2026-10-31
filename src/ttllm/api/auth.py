@@ -46,7 +46,13 @@ async def list_identity_providers():
 @router.post("/token", response_model=LoginTokenResponse)
 async def login(body: LoginRequest, db: DB):
     """Authenticate with email + password, receive management JWT + refresh token."""
-    user = await auth_service.authenticate_local(db, body.email, body.password)
+    try:
+        user = await auth_service.authenticate_local(db, body.email, body.password)
+    except auth_service.InactiveUserError:
+        raise HTTPException(
+            status_code=403,
+            detail={"type": "permission_error", "message": auth_service.INACTIVE_USER_MESSAGE},
+        )
     if not user:
         raise HTTPException(
             status_code=401,
@@ -225,10 +231,27 @@ async def sso_callback(
         idp_refresh_token=token_data.get("refresh_token"),
     )
 
+    final_redirect = state_data.get("final_redirect")
+
+    # Deactivated accounts can still authenticate at the IdP, but must not be
+    # issued gateway tokens. Tell the caller why instead of handing out tokens
+    # that would 403 on every request.
+    if not user.is_active:
+        if final_redirect:
+            from urllib.parse import urlencode
+            params = urlencode({
+                "error": "account_inactive",
+                "error_description": auth_service.INACTIVE_USER_MESSAGE,
+            })
+            return RedirectResponse(url=f"{final_redirect}?{params}")
+        raise HTTPException(
+            status_code=403,
+            detail={"type": "permission_error", "message": auth_service.INACTIVE_USER_MESSAGE},
+        )
+
     result = await auth_service.create_management_tokens(db, user)
 
     # CLI flow: redirect back to the CLI's ephemeral server with tokens
-    final_redirect = state_data.get("final_redirect")
     if final_redirect:
         from urllib.parse import urlencode
         params = urlencode({

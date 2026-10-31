@@ -519,6 +519,7 @@ ttllm me tokens                      # List your active tokens
 ttllm me tokens create               # Create a token for yourself
 ttllm me tokens delete <id>          # Revoke one of your tokens
 ttllm users list|show|create|update|delete
+ttllm users deactivate|activate <user> # Block/unblock a user (all tokens rejected, login refused)
 ttllm models list|show|create|update|delete|assign|unassign
 ttllm groups list|show|create|update|delete
 ttllm tokens list|show|create|delete

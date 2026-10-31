@@ -82,6 +82,10 @@ class _FakeClient:
     def delete(self, *args, **kwargs):
         return _FakeResponse(204)
 
+    def patch(self, *args, **kwargs):
+        self.patched = (args, kwargs)
+        return _FakeResponse(200, self._payload)
+
 
 def _patch_client(monkeypatch, module, payload):
     client = _FakeClient(payload)
@@ -120,3 +124,23 @@ def test_users_delete_json_emits_synthetic_status(monkeypatch):
     result = runner.invoke(users.app, ["delete", "some-id", "--use-ids", "--json"])
     assert result.exit_code == 0
     assert json.loads(result.output) == {"status": "deleted", "id": "some-id"}
+
+
+def test_users_deactivate_sends_is_active_false(monkeypatch):
+    payload = {"id": "u1", "name": "Alice", "email": "alice@example.com", "is_active": False}
+    client = _patch_client(monkeypatch, users, payload)
+
+    result = runner.invoke(users.app, ["deactivate", "u1", "--use-ids"])
+    assert result.exit_code == 0, result.output
+    assert client.patched == (("/admin/users/u1",), {"json": {"is_active": False}})
+    assert "deactivated" in result.output
+
+
+def test_users_activate_json(monkeypatch):
+    payload = {"id": "u1", "name": "Alice", "email": "alice@example.com", "is_active": True}
+    client = _patch_client(monkeypatch, users, payload)
+
+    result = runner.invoke(users.app, ["activate", "u1", "--use-ids", "--json"])
+    assert result.exit_code == 0, result.output
+    assert client.patched[1] == {"json": {"is_active": True}}
+    assert json.loads(result.output) == payload

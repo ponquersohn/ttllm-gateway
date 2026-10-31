@@ -52,19 +52,35 @@ def _jwt_config() -> JWTConfig:
 _DUMMY_HASH = "$2b$12$LJ3m4ys3Lg2HEOFqIHwJNOd1bnMqGgYqJmGx4Q7GkWbM0FHXN0kCq"
 
 
+class InactiveUserError(Exception):
+    """Raised when a user with valid credentials/SSO identity is deactivated."""
+
+
+INACTIVE_USER_MESSAGE = (
+    "Your account is deactivated. Contact your administrator to restore access."
+)
+
+
 async def authenticate_local(
     db: AsyncSession,
     email: str,
     password: str,
 ) -> User | None:
-    """Verify email + password for an internal user. Returns User or None."""
+    """Verify email + password for an internal user. Returns User or None.
+
+    Raises ``InactiveUserError`` only *after* the password has been verified, so
+    the account's deactivated status is revealed only to someone who already
+    holds valid credentials (not usable for account enumeration).
+    """
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if not user or not user.is_active or user.identity_provider is not None or not user.password_hash:
+    if not user or user.identity_provider is not None or not user.password_hash:
         verify_password(password, _DUMMY_HASH)
         return None
     if not verify_password(password, user.password_hash):
         return None
+    if not user.is_active:
+        raise InactiveUserError(user.email)
     return user
 
 

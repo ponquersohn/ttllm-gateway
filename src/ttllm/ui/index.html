@@ -1008,6 +1008,12 @@ tr:hover td{background:rgba(0,0,0,.015)}
     loadVersion();
     // Check for SSO callback tokens in URL
     var params = new URLSearchParams(window.location.search);
+    if (params.has("error")) {
+      // SSO callback rejected the login (e.g. deactivated account).
+      var ssoError = params.get("error_description") || params.get("error");
+      history.replaceState(null, "", window.location.pathname);
+      setTimeout(function() { toast(ssoError, "error"); }, 0);
+    }
     if (params.has("access_token")) {
       storeTokens(params.get("access_token"), params.get("refresh_token") || null);
       history.replaceState(null, "", window.location.pathname);
