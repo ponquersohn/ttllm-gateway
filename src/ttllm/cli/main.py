@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional
@@ -49,7 +50,12 @@ def _login_local(base_url: str):
 
     resp = TTLLMClient.login(base_url, email, password)
     if resp.status_code != 200:
-        console.print(f"[red]Login failed:[/red] {resp.text}")
+        try:
+            body = resp.json()
+            message = (body.get("error") or body.get("detail") or {}).get("message") or resp.text
+        except (ValueError, AttributeError):
+            message = resp.text
+        console.print(f"[red]Login failed:[/red] {message}")
         raise typer.Exit(1)
     console.print("[green]Login successful.[/green]")
 
@@ -76,10 +82,17 @@ def _login_sso(idp_slug: str, base_url: str):
                 token_data["access_token"] = params["access_token"][0]
                 token_data["refresh_token"] = params.get("refresh_token", [""])[0]
                 token_data["received"] = True
+            elif "error" in params:
+                token_data["error"] = params["error"][0]
+                token_data["error_description"] = params.get("error_description", [""])[0]
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
-            self.wfile.write(b"<html><body><h2>Login successful. You can close this window.</h2></body></html>")
+            if token_data.get("error"):
+                msg = html.escape(token_data.get("error_description") or token_data["error"])
+                self.wfile.write(f"<html><body><h2>Login failed</h2><p>{msg}</p></body></html>".encode())
+            else:
+                self.wfile.write(b"<html><body><h2>Login successful. You can close this window.</h2></body></html>")
 
         def log_message(self, format, *args):
             pass  # Suppress HTTP logs
@@ -96,6 +109,11 @@ def _login_sso(idp_slug: str, base_url: str):
     if token_data.get("access_token"):
         TTLLMClient.login_with_tokens(base_url, token_data["access_token"], token_data.get("refresh_token"))
         console.print("[green]SSO login successful.[/green]")
+    elif token_data.get("error"):
+        console.print(
+            f"[red]SSO login failed:[/red] {token_data.get('error_description') or token_data['error']}"
+        )
+        raise typer.Exit(1)
     else:
         console.print("[red]SSO login failed: no token received.[/red]")
         raise typer.Exit(1)

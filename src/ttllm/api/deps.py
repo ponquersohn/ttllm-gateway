@@ -63,7 +63,7 @@ async def _authenticate(token: str, db: AsyncSession) -> AuthContext:
     if not user or not user.is_active:
         raise HTTPException(
             status_code=403,
-            detail={"type": "permission_error", "message": "User deactivated"},
+            detail={"type": "permission_error", "message": auth_service.INACTIVE_USER_MESSAGE},
         )
 
     await auth_service.maybe_refresh_sso_roles(db, user)

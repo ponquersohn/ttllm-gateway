@@ -176,6 +176,46 @@ def users_update(
     console.print(f"[green]User updated:[/green] {data['name']}")
 
 
+def _set_active(user: str, use_ids: bool, active: bool) -> None:
+    with get_client() as client:
+        user_id = user if use_ids else resolve_user(client, user)
+        data = handle_response(
+            client.patch(f"/admin/users/{user_id}", json={"is_active": active})
+        )
+    if json_mode():
+        print_json(data)
+        return
+    state = "[green]activated[/green]" if active else "[yellow]deactivated[/yellow]"
+    console.print(f"User {state}: {data['name']} ({data['email']})")
+
+
+@app.command("activate")
+def users_activate(
+    user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
+    use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
+):
+    """Re-enable a deactivated user.
+
+    Gateway tokens revoked while the user was inactive stay revoked; the user
+    must create new ones.
+    """
+    _set_active(user, use_ids, True)
+
+
+@app.command("deactivate")
+def users_deactivate(
+    user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),
+    use_ids: bool = typer.Option(False, "--use-ids", help="Treat argument as UUID"),
+):
+    """Block a user without deleting them.
+
+    Takes effect immediately: every existing token (gateway, login and refresh)
+    is rejected, and password/SSO login is refused with an "account deactivated"
+    message. Usage history is kept. Reverse with ``ttllm users activate``.
+    """
+    _set_active(user, use_ids, False)
+
+
 @app.command("delete")
 def users_delete(
     user: str = typer.Argument(help="User name or email (or ID with --use-ids)"),

@@ -34,7 +34,7 @@ pytest                               # Run tests
 uvicorn ttllm.handlers.ecs_entrypoint:app --reload  # Dev server
 
 # CLI (admin operations)
-ttllm users list|show|create|update|delete
+ttllm users list|show|create|update|delete|activate|deactivate
 ttllm models list|show|create|update|delete|assign|unassign
 ttllm groups list|show|create|update|delete
 ttllm tokens list|show|create|delete

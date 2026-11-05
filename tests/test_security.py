@@ -504,23 +504,116 @@ class TestAuthenticateLocalTimingSafety:
             mock_verify.assert_called_once()
             assert mock_verify.call_args[0][1] == _DUMMY_HASH
 
-    @pytest.mark.asyncio
-    async def test_inactive_user_gets_dummy_hash(self):
-        from ttllm.services.auth_service import _DUMMY_HASH, authenticate_local
-
+    @staticmethod
+    def _inactive_db():
         mock_user = MagicMock()
         mock_user.is_active = False
         mock_user.identity_provider = None
         mock_user.password_hash = "real-hash"
+        mock_user.email = "inactive@example.com"
 
         mock_db = MagicMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_user
         mock_db.execute = AsyncMock(return_value=mock_result)
+        return mock_db
+
+    @pytest.mark.asyncio
+    async def test_inactive_user_wrong_password_is_generic_failure(self):
+        """Wrong password on an inactive account looks like any bad login (no enumeration)."""
+        from ttllm.services.auth_service import authenticate_local
 
         with patch("ttllm.services.auth_service.verify_password") as mock_verify:
             mock_verify.return_value = False
-            result = await authenticate_local(mock_db, "inactive@example.com", "password123")
+            result = await authenticate_local(self._inactive_db(), "inactive@example.com", "nope")
             assert result is None
             mock_verify.assert_called_once()
-            assert mock_verify.call_args[0][1] == _DUMMY_HASH
+            assert mock_verify.call_args[0][1] == "real-hash"
+
+    @pytest.mark.asyncio
+    async def test_inactive_user_correct_password_raises(self):
+        """Only someone holding valid credentials learns the account is deactivated."""
+        from ttllm.services.auth_service import InactiveUserError, authenticate_local
+
+        with patch("ttllm.services.auth_service.verify_password", return_value=True):
+            with pytest.raises(InactiveUserError):
+                await authenticate_local(self._inactive_db(), "inactive@example.com", "right")
+
+
+# ---------------------------------------------------------------------------
+# Deactivated users at login
+# ---------------------------------------------------------------------------
+
+
+class TestInactiveUserLogin:
+    @pytest.mark.asyncio
+    async def test_local_login_returns_403_with_message(self):
+        from fastapi import HTTPException
+
+        from ttllm.api.auth import login
+        from ttllm.schemas.auth import LoginRequest
+        from ttllm.services.auth_service import INACTIVE_USER_MESSAGE, InactiveUserError
+
+        with patch(
+            "ttllm.services.auth_service.authenticate_local",
+            AsyncMock(side_effect=InactiveUserError("x")),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await login(LoginRequest(email="a@b.c", password="pw"), MagicMock())
+        assert exc.value.status_code == 403
+        assert exc.value.detail["message"] == INACTIVE_USER_MESSAGE
+
+    @staticmethod
+    def _sso_patches(user, final_redirect):
+        idp = MagicMock()
+        idp.default_groups = ["users"]
+        idp.group_mapping = {}
+        return [
+            patch("ttllm.api.auth.oidc_state_service.pop_state", AsyncMock(return_value={
+                "idp_slug": "entra", "redirect_uri": "https://gw/cb",
+                "code_verifier": "v", "nonce": None, "final_redirect": final_redirect,
+            })),
+            patch.dict("ttllm.api.auth.settings.auth.identity_providers", {"entra": idp}),
+            patch("ttllm.api.auth.oidc.discover", AsyncMock(return_value=MagicMock())),
+            patch("ttllm.api.auth.oidc.exchange_code", AsyncMock(return_value={"access_token": "a"})),
+            patch("ttllm.api.auth.oidc.fetch_userinfo", AsyncMock(return_value={"sub": "s", "email": "e"})),
+            patch("ttllm.api.auth.auth_service.provision_sso_user", AsyncMock(return_value=user)),
+            patch("ttllm.api.auth.auth_service.create_management_tokens", AsyncMock()),
+        ]
+
+    async def _call_callback(self, user, final_redirect):
+        import contextlib
+
+        from ttllm.api.auth import sso_callback
+
+        patches = self._sso_patches(user, final_redirect)
+        with contextlib.ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in patches]
+            try:
+                return await sso_callback("entra", "code", "state", MagicMock()), mocks[-1]
+            except Exception as exc:  # noqa: BLE001 - surfaced to the test
+                return exc, mocks[-1]
+
+    @pytest.mark.asyncio
+    async def test_sso_callback_inactive_user_redirect_flow(self):
+        from urllib.parse import parse_qs, urlparse
+
+        from ttllm.services.auth_service import INACTIVE_USER_MESSAGE
+
+        user = MagicMock(is_active=False)
+        resp, create_tokens = await self._call_callback(user, "http://localhost:5555/callback")
+        create_tokens.assert_not_called()
+        qs = parse_qs(urlparse(resp.headers["location"]).query)
+        assert qs["error"] == ["account_inactive"]
+        assert qs["error_description"] == [INACTIVE_USER_MESSAGE]
+        assert "access_token" not in qs
+
+    @pytest.mark.asyncio
+    async def test_sso_callback_inactive_user_json_flow(self):
+        from fastapi import HTTPException
+
+        user = MagicMock(is_active=False)
+        exc, create_tokens = await self._call_callback(user, None)
+        create_tokens.assert_not_called()
+        assert isinstance(exc, HTTPException)
+        assert exc.status_code == 403
