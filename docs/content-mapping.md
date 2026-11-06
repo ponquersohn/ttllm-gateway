@@ -48,15 +48,21 @@ are handled, and it decays fast if left to comments scattered across provider fi
 
 | Type | Fields | Notes |
 |---|---|---|
-| `TextPart` | `text`, `cache_control` | |
+| `TextPart` | `text`, `citations: list[Citation] \| None`, `cache_control` | `citations` is set on model output that cites a supplied document/search result. |
 | `ImagePart` | `media_type`, `data` (base64), `cache_control` | |
-| `DocumentPart` | `media_type`, `data` (base64), `title`, `cache_control` | |
+| `DocumentPart` | `source_kind` (`base64` \| `text` \| `content`), `media_type`, `data` (base64), `text`, `content: list[TextPart \| ImagePart]`, `title`, `context`, `citations` (bool), `cache_control` | `source_kind` says which of `data`/`text`/`content` holds the document. |
+| `SearchResultPart` | `source`, `title`, `content: list[TextPart]`, `citations` (bool), `cache_control` | Caller-supplied search result (RAG); citable like a document. |
 | `ToolCallPart` | `id`, `name`, `input` (dict), `cache_control` | An assistant-turn tool invocation. |
-| `ToolResultPart` | `tool_call_id`, `content: list[TextPart \| ImagePart]`, `is_error`, `cache_control` | `content` is always a list — no input adapter should ever hand a provider a bare string here. |
+| `ToolResultPart` | `tool_call_id`, `content: list[TextPart \| ImagePart \| DocumentPart \| SearchResultPart]`, `is_error`, `cache_control` | `content` is always a list — no input adapter should ever hand a provider a bare string here. |
 | `ThinkingPart` | `text`, `signature`, `cache_control` | |
 | `RedactedThinkingPart` | `data`, `cache_control` | Opaque — the payload is encrypted, not even Anthropic can read it. |
-| `ServerToolCallPart` | `id`, `name`, `input` (dict), `cache_control` | A server-side tool invocation (e.g. Anthropic's built-in web_search). |
-| `ServerToolResultPart` | `tool_call_id`, `content` (untyped list), `cache_control` | |
+| `ServerToolCallPart` | `call_type`, `id`, `name`, `input` (dict), `extra`, `cache_control` | A server-side tool invocation (e.g. Anthropic's built-in web_search, or an MCP connector call). `call_type`/`extra` keep the wire block type and any extra fields so it round-trips. |
+| `ServerToolResultPart` | `result_type`, `tool_call_id`, `content` (opaque), `extra`, `cache_control` | `result_type` is the wire block type (`web_search_tool_result`, `web_fetch_tool_result`, `code_execution_tool_result`, `mcp_tool_result`, ...). |
+
+`Citation` (not a `Part`; hangs off `TextPart.citations` and the `CITATION_DELTA` chunk):
+`kind` (`char` \| `page` \| `chunk` \| `search_result` \| `web`), `cited_text`,
+`document_index`, `document_title`, `search_result_index`, `start`, `end` (exclusive),
+`source`, `title`, `url`.
 
 `cache_control` is a plain bool on every part. The Anthropic input adapter sets it from the
 wire `cache_control` field on text, image, document, tool_use and tool_result blocks (the
@@ -90,25 +96,31 @@ tools" below.
   final response (e.g. `core/adapters/anthropic.py::result_to_response`).
 - `InternalChunk`: one item of a provider's streamed output — `BLOCK_START` (carries an
   empty-shell `Part` so a streaming encoder knows the block's type), `TEXT_DELTA`,
-  `TOOL_ARGS_DELTA`, `THINKING_DELTA`, `SIGNATURE_DELTA`, `BLOCK_STOP`, `MESSAGE_STOP`
+  `TOOL_ARGS_DELTA`, `THINKING_DELTA`, `SIGNATURE_DELTA`, `CITATION_DELTA` (carries one
+  `Citation` for the current text block), `BLOCK_STOP`, `MESSAGE_STOP`
   (carries final `stop_reason` + `usage` + `safeguard_results`), `ERROR`.
 
 ## Anthropic input adapter (`core/adapters/anthropic.py`, `core/adapters/anthropic_stream.py`)
 
 | Anthropic concept | Internal representation |
 |---|---|
-| `TextBlock` | `TextPart` |
-| `ImageBlock` | `ImagePart` |
-| `DocumentBlock` | `DocumentPart` |
+| `TextBlock` (incl. `citations`) | `TextPart` (citation locations ⇄ `Citation`: `char_location`→`char`, `page_location`→`page`, `content_block_location`→`chunk`, `search_result_location`→`search_result`, `web_search_result_location`→`web`) |
+| `ImageBlock` with `base64` source | `ImagePart` |
+| `DocumentBlock` with `base64` / `text` / `content` source (+ `title`, `context`, `citations.enabled`) | `DocumentPart` with `source_kind` `base64` / `text` / `content` |
+| Image/document `url` or `file` (Files API) source | **Error** (`UnsupportedContentError` → 400). The gateway doesn't fetch URLs (SSRF surface) and has no file store; the message tells the client to send base64. |
+| `SearchResultBlock` (top level or inside `tool_result`) | `SearchResultPart` |
 | `ToolUseBlock` | `ToolCallPart` |
-| `ToolResultBlock` (`content: str \| list[TextBlock \| ImageBlock]`) | `ToolResultPart` (`content` always normalized to `list[TextPart \| ImagePart]`) |
+| `ToolResultBlock` (`content: str \| list[TextBlock \| ImageBlock \| DocumentBlock \| SearchResultBlock]`) | `ToolResultPart` (`content` always normalized to a list of the matching parts) |
 | `ThinkingBlock` | `ThinkingPart` |
 | `RedactedThinkingBlock` | `RedactedThinkingPart` |
 | Top-level `system` + mid-conversation `role="system"` messages | Flattened into `InternalRequest.system: list[TextPart]` — one part per top-level system block (preserving its own `cache_control`), then one part per inline system message, in conversation order. Unlike a bare string, this keeps each block's cache boundary intact instead of merging everything (cached prefix and any uncached trailing content) into one span. |
 | `cache_control: dict \| None` | `cache_control: bool` |
 | `ToolChoiceAuto/Any/Tool/None` | `ToolChoice(mode=..., tool_name=...)` |
-| `ServerToolUseBlock` | `ServerToolCallPart` |
-| `WebSearchToolResultBlock` | `ServerToolResultPart` |
+| `ServerToolUseBlock` / `mcp_tool_use` | `ServerToolCallPart` (`call_type` = wire type) |
+| `WebSearchToolResultBlock`, and generic `ServerToolResultBlock` for `web_fetch_tool_result`, `code_execution_tool_result`, `bash_code_execution_tool_result`, `text_editor_code_execution_tool_result`, `tool_search_tool_result`, `mcp_tool_result` | `ServerToolResultPart` (`result_type` = wire type) |
+| Any other content block type (`UnknownBlock`) | **Error** (`UnsupportedContentError` → 400 naming the type). Parsed rather than failing schema validation, so a new/beta block type yields a readable 400 instead of a 422. Applies inside `tool_result` too. |
+| Tool `input_schema` | `ToolSpec.input_schema`, the whole JSON Schema (`$defs`, `anyOf`, `additionalProperties`, ...) — not just `properties`/`required`. |
+| Unknown top-level request params (`container`, `mcp_servers`, `context_management`, ...) | Not forwarded; logged as a warning (`Ignoring unsupported top-level request params: ...`) instead of disappearing silently. Never rejected. |
 | `ServerToolDefinition` (in `tools`) | `ServerToolSpec` (`InternalRequest.server_tools`, kept separate from `InternalRequest.tools`) |
 | Request `safeguards` | `InternalRequest.safeguards` (verbatim) |
 | Response `safeguard_results` (non-streaming: top level, omitted when `None`; streaming: on `message_delta.delta`) | `InternalResult.safeguard_results` / `MESSAGE_STOP` chunk's `safeguard_results` |
@@ -171,7 +183,11 @@ below are deliberate exceptions because there is no real content being lost.
 
 | Part | Handling |
 |---|---|
-| `TextPart`, `ImagePart`, `DocumentPart`, `ToolCallPart`, `ToolResultPart`, `ThinkingPart` | Full native support (Bedrock Converse has direct equivalents for all of these). |
+| `TextPart`, `ImagePart`, `DocumentPart`, `SearchResultPart`, `ToolCallPart`, `ToolResultPart`, `ThinkingPart` | Full native support (Bedrock Converse has direct equivalents for all of these). Images, documents and search results nested inside a `ToolResultPart` map to `image`/`document`/`searchResult` entries in `toolResult.content` (e.g. Claude Code's Read tool returning a PDF). `TextPart.citations` on a replayed assistant turn is dropped (output metadata; Converse takes the text). |
+| `DocumentPart` details | `media_type` → Converse `format` via a fixed table (`pdf`, `txt`, `md`, `csv`, `html`, `doc`, `docx`, `xls`, `xlsx`); anything else → **Error** (400). `text` source → `source.text`, `content` source → `source.content` (text only — an image inside it → 400), both with format `txt` — but only when citations are enabled: Converse rejects those source keys otherwise, so without citations the text is sent as UTF-8 `bytes` (content chunks joined by blank lines). `context` and `citations.enabled` pass through natively. Names are sanitized to Converse's allowed characters (alphanumerics, single spaces, `-()[]`) and de-duplicated per request (`document`, `document (2)`, ...). |
+| `ImagePart` details | `image/jpg` is normalized to `jpeg`; formats other than png/jpeg/gif/webp → **Error** (400). |
+| `ToolSpec` | `input_schema` passed through verbatim (an empty `required` array is dropped; `type: object` defaulted if missing). An empty `description` is omitted (Converse requires min length 1). |
+| Response citations | Non-streaming `citationsContent` blocks → `TextPart(citations=...)`; streaming `contentBlockDelta.delta.citation` → `CITATION_DELTA` (accumulated onto the assembled `TextPart`). Converse `documentChar`/`documentPage`/`documentChunk`/`searchResultLocation`/`web` → `Citation.kind` `char`/`page`/`chunk`/`search_result`/`web`. |
 | `RedactedThinkingPart` | **Silent drop.** Bedrock has no equivalent, and there's nothing to emulate — the payload is opaque even to Anthropic. This is the one deliberate exception to "always emulate or error." |
 | `ServerToolCallPart`, `ServerToolResultPart`, non-empty `server_tools` | **Error** (`ServerToolError`, mapped to HTTP 501 `not_implemented_error`). Bedrock Converse has no mechanism to proxy server-side tools. |
 
@@ -190,7 +206,9 @@ provider applies the same mapping for `finish_reason == "content_filter"`.
 | `ImagePart` inside a `ToolResultPart` | **Emulate.** Passed through as a multimodal content part in the `ToolMessage`, the same mechanism used for a normal image. Previously this crashed (`AttributeError` — the old code assumed every tool-result item had a `.text` attribute); now it just works. |
 | `ThinkingPart` | **Emulate.** Folded into a normal text part — no native "thinking" concept on this provider, but the reasoning content itself is preserved rather than silently dropped. |
 | `RedactedThinkingPart` | **Silent drop.** Same reasoning as Bedrock — the payload is opaque, there's no content actually being lost. |
-| `DocumentPart` | **Error** (`UnsupportedContentError`, mapped to HTTP 400 `invalid_request_error`). No native document/PDF input on OpenAI-style chat APIs, and dropping it silently would mean the model answers as if it had read an attachment it never saw — the "impacts inference quality" case that error, not emulation, exists for. |
+| `DocumentPart` with a `text`/`content` source, or a base64 `text/*` media type | **Emulate.** Rendered as a text part: `[Document: {title}]`, then `context`, then the text. Applies top-level, in a `ToolResultPart` and on assistant turns. Citations are not available on this provider. |
+| `DocumentPart` with a binary base64 source (PDF, DOCX, ...) | **Error** (`UnsupportedContentError`, mapped to HTTP 400 `invalid_request_error`), top-level or inside a `ToolResultPart`. No native document/PDF input on OpenAI-style chat APIs, and dropping it silently would mean the model answers as if it had read an attachment it never saw — the "impacts inference quality" case that error, not emulation, exists for. |
+| `SearchResultPart` | **Emulate.** Rendered as text `[Search result: {title} ({source})]` followed by its content, top-level or inside a `ToolResultPart`. |
 | `ToolCallPart` in a non-assistant-turn position | **Best-effort text stub** (`[tool_use: name(args)]`). This is a malformed/edge-case input path — a valid Anthropic conversation never puts a tool call outside an assistant turn — not a real feature gap, so it gets a defensive fallback rather than an error. |
 | `ServerToolCallPart`, `ServerToolResultPart`, non-empty `server_tools` | **Error** (`ServerToolError`, mapped to HTTP 501 `not_implemented_error`). No OpenAI-compatible backend this gateway targets can execute Anthropic-style server-side tools. |
 

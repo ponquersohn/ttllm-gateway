@@ -12,6 +12,7 @@ from ttllm.core.model import (
     InternalMessage,
     InternalRequest,
     RedactedThinkingPart,
+    SearchResultPart,
     ServerToolCallPart,
     ServerToolResultPart,
     ServerToolSpec,
@@ -131,6 +132,23 @@ class TestToLangchainMessages:
             {"type": "text", "text": "see:"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,aWdub3Jl"}},
         ]
+
+    def test_tool_result_with_document_errors(self):
+        request = _make_request(
+            messages=[
+                InternalMessage(
+                    role="user",
+                    content=[
+                        ToolResultPart(
+                            tool_call_id="tu_1",
+                            content=[DocumentPart(media_type="application/pdf", data="aWdub3Jl")],
+                        )
+                    ],
+                )
+            ]
+        )
+        with pytest.raises(UnsupportedContentError):
+            to_langchain_messages(request)
 
     def test_tool_result_and_other_content_split(self):
         request = _make_request(
@@ -342,3 +360,31 @@ class TestBindToolsToModel:
         tools = [ToolSpec(name="search", input_schema={"type": "object", "properties": {}})]
         bind_tools_to_model(model, tools, None)
         assert model.bound_kwargs == {}
+
+
+class TestDocumentEmulation:
+    def _user(self, *parts):
+        return to_langchain_messages(_make_request(messages=[InternalMessage(role="user", content=list(parts))]))
+
+    def test_text_document_emulated_as_text(self):
+        msgs = self._user(DocumentPart(source_kind="text", media_type="text/plain", text="body",
+                                       title="Notes", context="ctx"))
+        assert msgs[0].content == [{"type": "text", "text": "[Document: Notes]\nctx\nbody"}]
+
+    def test_content_document_emulated_as_text(self):
+        msgs = self._user(DocumentPart(source_kind="content", content=[TextPart(text="a"), TextPart(text="b")]))
+        assert msgs[0].content == [{"type": "text", "text": "[Document]\na\nb"}]
+
+    def test_base64_text_document_decoded(self):
+        msgs = self._user(DocumentPart(media_type="text/csv", data="YSxiCjEsMg=="))
+        assert msgs[0].content == [{"type": "text", "text": "[Document]\na,b\n1,2"}]
+
+    def test_search_result_emulated_in_tool_result(self):
+        sr = SearchResultPart(source="https://kb/1", title="KB", content=[TextPart(text="fact")])
+        msgs = self._user(ToolResultPart(tool_call_id="t", content=[sr]))
+        assert isinstance(msgs[0], ToolMessage)
+        assert msgs[0].content == "[Search result: KB (https://kb/1)]\nfact"
+
+    def test_binary_pdf_still_errors(self):
+        with pytest.raises(UnsupportedContentError):
+            self._user(DocumentPart(media_type="application/pdf", data="aWdub3Jl"))

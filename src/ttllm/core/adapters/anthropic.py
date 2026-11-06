@@ -8,11 +8,13 @@ Everything downstream (``core/gateway.py``, both providers) only ever sees
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
 from ttllm.core.errors import UnsupportedContentError
 from ttllm.core.model import (
+    Citation,
     DocumentPart,
     ImagePart,
     InternalMessage,
@@ -20,6 +22,7 @@ from ttllm.core.model import (
     InternalResult,
     Part,
     RedactedThinkingPart,
+    SearchResultPart,
     ServerToolCallPart,
     ServerToolResultPart,
     ServerToolSpec,
@@ -33,14 +36,18 @@ from ttllm.core.model import (
 )
 from ttllm.schemas.anthropic import (
     ContentBlock,
+    ContentSource,
     DocumentBlock,
     ImageBlock,
     ImageSource,
     Message,
     MessagesRequest,
     MessagesResponse,
+    PlainTextSource,
     RedactedThinkingBlock,
+    SearchResultBlock,
     ServerToolDefinition,
+    ServerToolResultBlock,
     ServerToolUseBlock,
     TextBlock,
     ThinkingBlock,
@@ -51,34 +58,163 @@ from ttllm.schemas.anthropic import (
     ToolDefinition,
     ToolResultBlock,
     ToolUseBlock,
+    UnknownBlock,
     Usage,
     WebSearchToolResultBlock,
     DocumentSource,
 )
 
+logger = logging.getLogger(__name__)
 
-def _tool_result_content_to_parts(content: str | list[TextBlock | ImageBlock]) -> list[TextPart | ImagePart]:
+
+# --- Citations (wire <-> internal) ---
+
+_WIRE_CITATION_KIND = {
+    "char_location": "char",
+    "page_location": "page",
+    "content_block_location": "chunk",
+    "search_result_location": "search_result",
+    "web_search_result_location": "web",
+}
+_INDEX_FIELDS = {
+    "char": ("start_char_index", "end_char_index"),
+    "page": ("start_page_number", "end_page_number"),
+    "chunk": ("start_block_index", "end_block_index"),
+    "search_result": ("start_block_index", "end_block_index"),
+}
+
+
+def _citation_from_wire(c: dict[str, Any]) -> Citation | None:
+    kind = _WIRE_CITATION_KIND.get(c.get("type", ""))
+    if kind is None:
+        return None
+    start_key, end_key = _INDEX_FIELDS.get(kind, ("", ""))
+    return Citation(
+        kind=kind,
+        cited_text=c.get("cited_text", ""),
+        document_index=c.get("document_index"),
+        document_title=c.get("document_title"),
+        search_result_index=c.get("search_result_index"),
+        start=c.get(start_key),
+        end=c.get(end_key),
+        source=c.get("source"),
+        title=c.get("title"),
+        url=c.get("url"),
+    )
+
+
+def citation_to_wire(c: Citation) -> dict[str, Any]:
+    """Internal ``Citation`` -> Anthropic citation-location dict (shared with the SSE encoder)."""
+    if c.kind == "web":
+        return {"type": "web_search_result_location", "cited_text": c.cited_text,
+                "url": c.url or "", "title": c.title, "encrypted_index": ""}
+    start_key, end_key = _INDEX_FIELDS[c.kind]
+    out: dict[str, Any] = {"cited_text": c.cited_text}
+    if c.kind == "search_result":
+        out.update(type="search_result_location", search_result_index=c.search_result_index or 0,
+                   source=c.source or "", title=c.title)
+    else:
+        out.update(type={"char": "char_location", "page": "page_location",
+                         "chunk": "content_block_location"}[c.kind],
+                   document_index=c.document_index or 0, document_title=c.document_title)
+    out[start_key] = c.start or 0
+    out[end_key] = c.end or 0
+    return out
+
+
+# --- Content blocks -> parts ---
+
+
+def _unsupported_source(kind: str, source_type: str) -> UnsupportedContentError:
+    if source_type == "file":
+        return UnsupportedContentError(
+            f"{kind.capitalize()} sources of type 'file' (Files API) are not supported by this "
+            f"gateway; send the {kind} inline as base64."
+        )
+    return UnsupportedContentError(
+        f"{kind.capitalize()} sources of type {source_type!r} are not supported by this gateway; "
+        f"send the {kind} inline as base64."
+    )
+
+
+def _text_to_part(b: TextBlock) -> TextPart:
+    citations = None
+    if b.citations:
+        citations = [c for c in (_citation_from_wire(d) for d in b.citations) if c is not None] or None
+    return TextPart(text=b.text, citations=citations, cache_control=bool(b.cache_control))
+
+
+def _image_to_part(b: ImageBlock) -> ImagePart:
+    if not isinstance(b.source, ImageSource):
+        raise _unsupported_source("image", b.source.type)
+    return ImagePart(media_type=b.source.media_type, data=b.source.data, cache_control=bool(b.cache_control))
+
+
+def _document_to_part(b: DocumentBlock) -> DocumentPart:
+    common: dict[str, Any] = dict(
+        title=b.title,
+        context=b.context,
+        citations=bool((b.citations or {}).get("enabled")),
+        cache_control=bool(b.cache_control),
+    )
+    src = b.source
+    if isinstance(src, DocumentSource):
+        return DocumentPart(source_kind="base64", media_type=src.media_type, data=src.data, **common)
+    if isinstance(src, PlainTextSource):
+        return DocumentPart(source_kind="text", media_type=src.media_type, text=src.data, **common)
+    if isinstance(src, ContentSource):
+        if isinstance(src.content, str):
+            inner: list[TextPart | ImagePart] = [TextPart(text=src.content)]
+        else:
+            inner = [_text_to_part(c) if isinstance(c, TextBlock) else _image_to_part(c) for c in src.content]
+        return DocumentPart(source_kind="content", media_type="text/plain", content=inner, **common)
+    raise _unsupported_source("document", src.type)
+
+
+def _search_result_to_part(b: SearchResultBlock) -> SearchResultPart:
+    return SearchResultPart(
+        source=b.source,
+        title=b.title,
+        content=[TextPart(text=t.text) for t in b.content],
+        citations=bool((b.citations or {}).get("enabled")),
+        # Converse can't put a cachePoint inside searchResult.content; promote inner markers.
+        cache_control=bool(b.cache_control) or any(t.cache_control for t in b.content),
+    )
+
+
+def _unknown_block(b: UnknownBlock) -> UnsupportedContentError:
+    return UnsupportedContentError(f"Content block type {b.type!r} is not supported by this gateway.")
+
+
+def _tool_result_content_to_parts(
+    content: str | list[Any],
+) -> list[TextPart | ImagePart | DocumentPart | SearchResultPart]:
     if isinstance(content, str):
         return [TextPart(text=content)] if content else []
-    parts: list[TextPart | ImagePart] = []
+    parts: list[TextPart | ImagePart | DocumentPart | SearchResultPart] = []
     for b in content:
         if isinstance(b, TextBlock):
-            parts.append(TextPart(text=b.text, cache_control=bool(b.cache_control)))
+            parts.append(_text_to_part(b))
         elif isinstance(b, ImageBlock):
-            parts.append(ImagePart(media_type=b.source.media_type, data=b.source.data,
-                                    cache_control=bool(b.cache_control)))
+            parts.append(_image_to_part(b))
+        elif isinstance(b, DocumentBlock):
+            parts.append(_document_to_part(b))
+        elif isinstance(b, SearchResultBlock):
+            parts.append(_search_result_to_part(b))
+        elif isinstance(b, UnknownBlock):
+            raise _unknown_block(b)
     return parts
 
 
 def _block_to_part(block: ContentBlock) -> Part:
     if isinstance(block, TextBlock):
-        return TextPart(text=block.text, cache_control=bool(block.cache_control))
+        return _text_to_part(block)
     if isinstance(block, ImageBlock):
-        return ImagePart(media_type=block.source.media_type, data=block.source.data,
-                         cache_control=bool(block.cache_control))
+        return _image_to_part(block)
     if isinstance(block, DocumentBlock):
-        return DocumentPart(media_type=block.source.media_type, data=block.source.data, title=block.title,
-                            cache_control=bool(block.cache_control))
+        return _document_to_part(block)
+    if isinstance(block, SearchResultBlock):
+        return _search_result_to_part(block)
     if isinstance(block, ToolUseBlock):
         return ToolCallPart(id=block.id, name=block.name, input=block.input,
                             cache_control=bool(block.cache_control))
@@ -98,9 +234,15 @@ def _block_to_part(block: ContentBlock) -> Part:
     if isinstance(block, RedactedThinkingBlock):
         return RedactedThinkingPart(data=block.data)
     if isinstance(block, ServerToolUseBlock):
-        return ServerToolCallPart(id=block.id, name=block.name, input=block.input)
+        return ServerToolCallPart(id=block.id, name=block.name, input=block.input,
+                                  call_type=block.type, extra=dict(block.model_extra or {}))
     if isinstance(block, WebSearchToolResultBlock):
         return ServerToolResultPart(tool_call_id=block.tool_use_id, content=list(block.content))
+    if isinstance(block, ServerToolResultBlock):
+        return ServerToolResultPart(tool_call_id=block.tool_use_id, content=block.content,
+                                    result_type=block.type, extra=dict(block.model_extra or {}))
+    if isinstance(block, UnknownBlock):
+        raise _unknown_block(block)
     raise AssertionError(f"Unhandled content block type {type(block).__name__!r}")
 
 
@@ -213,6 +355,11 @@ def request_to_internal(request: MessagesRequest, llm_model: Any) -> InternalReq
     provider-layer decision (``ServerToolError``, raised from provider translation code),
     not something this adapter should presume.
     """
+    if request.model_extra:
+        logger.warning(
+            "Ignoring unsupported top-level request params: %s", ", ".join(sorted(request.model_extra))
+        )
+
     system = _flatten_system(request)
 
     messages = [
@@ -240,12 +387,25 @@ def request_to_internal(request: MessagesRequest, llm_model: Any) -> InternalReq
 
 def _part_to_block(part: Part) -> ContentBlock:
     if isinstance(part, TextPart):
-        return TextBlock(text=part.text)
+        citations = [citation_to_wire(c) for c in part.citations] if part.citations else None
+        return TextBlock(text=part.text, citations=citations)
     if isinstance(part, ImagePart):
         return ImageBlock(source=ImageSource(media_type=part.media_type, data=part.data))
     if isinstance(part, DocumentPart):
+        if part.source_kind == "text":
+            source: Any = PlainTextSource(media_type=part.media_type, data=part.text or "")
+        elif part.source_kind == "content":
+            source = ContentSource(content=[_part_to_block(p) for p in part.content or []])
+        else:
+            source = DocumentSource(media_type=part.media_type, data=part.data)
         return DocumentBlock(
-            source=DocumentSource(media_type=part.media_type, data=part.data), title=part.title
+            source=source, title=part.title, context=part.context,
+            citations={"enabled": True} if part.citations else None,
+        )
+    if isinstance(part, SearchResultPart):
+        return SearchResultBlock(
+            source=part.source, title=part.title, content=[TextBlock(text=t.text) for t in part.content],
+            citations={"enabled": True} if part.citations else None,
         )
     if isinstance(part, ToolCallPart):
         return ToolUseBlock(id=part.id, name=part.name, input=part.input)
@@ -254,9 +414,13 @@ def _part_to_block(part: Part) -> ContentBlock:
     if isinstance(part, RedactedThinkingPart):
         return RedactedThinkingBlock(data=part.data)
     if isinstance(part, ServerToolCallPart):
-        return ServerToolUseBlock(id=part.id, name=part.name, input=part.input)
+        return ServerToolUseBlock(type=part.call_type, id=part.id, name=part.name, input=part.input,
+                                  **part.extra)
     if isinstance(part, ServerToolResultPart):
-        return WebSearchToolResultBlock(tool_use_id=part.tool_call_id, content=part.content)
+        if part.result_type == "web_search_tool_result":
+            return WebSearchToolResultBlock(tool_use_id=part.tool_call_id, content=part.content)
+        return ServerToolResultBlock(type=part.result_type, tool_use_id=part.tool_call_id,
+                                     content=part.content, **part.extra)
     raise AssertionError(f"Unexpected part {type(part).__name__} in a provider result")
 
 

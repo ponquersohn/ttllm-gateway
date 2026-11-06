@@ -2,7 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30"
+# botocore supplies the bedrock-runtime service model the fake validates requests against.
+RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30" "botocore>=1.43"
 
 # The fake server only needs its own package (encoder + app), imported as a
 # top-level package inside the image.

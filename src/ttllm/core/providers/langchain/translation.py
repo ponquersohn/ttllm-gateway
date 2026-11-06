@@ -8,6 +8,8 @@ translation.
 
 from __future__ import annotations
 
+import base64
+
 import uuid
 from typing import Any
 
@@ -30,6 +32,7 @@ from ttllm.core.model import (
     InternalUsage,
     Part,
     RedactedThinkingPart,
+    SearchResultPart,
     ServerToolCallPart,
     ServerToolResultPart,
     TextPart,
@@ -39,6 +42,36 @@ from ttllm.core.model import (
     ToolResultPart,
     ToolSpec,
 )
+
+
+def _document_as_text(part: DocumentPart) -> str:
+    """Emulate a text-bearing document as a labelled text part. Binary (base64) documents
+    can't be emulated -- the model would answer as if it read a file it never saw -- so
+    those raise ``UnsupportedContentError``."""
+    if part.source_kind == "text":
+        body = part.text or ""
+    elif part.source_kind == "content":
+        body = "\n".join(p.text for p in part.content or [] if isinstance(p, TextPart))
+    elif part.media_type.startswith("text/"):
+        # Plain-text formats sent base64-encoded (csv, markdown, html, ...).
+        try:
+            body = base64.b64decode(part.data).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise UnsupportedContentError(
+                f"Document with media type {part.media_type!r} is not valid UTF-8 text."
+            ) from exc
+    else:
+        raise UnsupportedContentError(
+            f"Document content ({part.media_type}) is not supported by the OpenAI-compatible provider; "
+            "only text documents can be passed through."
+        )
+    header = f"[Document: {part.title}]" if part.title else "[Document]"
+    return "\n".join(x for x in (header, part.context, body) if x)
+
+
+def _search_result_as_text(part: SearchResultPart) -> str:
+    body = "\n".join(t.text for t in part.content)
+    return f"[Search result: {part.title} ({part.source})]\n{body}"
 
 
 def _convert_parts_to_langchain(parts: list[Part]) -> list[dict]:
@@ -54,9 +87,9 @@ def _convert_parts_to_langchain(parts: list[Part]) -> list[dict]:
                 "image_url": {"url": f"data:{part.media_type};base64,{part.data}"},
             })
         elif isinstance(part, DocumentPart):
-            raise UnsupportedContentError(
-                "Document content is not supported by the OpenAI-compatible provider."
-            )
+            result.append({"type": "text", "text": _document_as_text(part)})
+        elif isinstance(part, SearchResultPart):
+            result.append({"type": "text", "text": _search_result_as_text(part)})
         elif isinstance(part, ToolCallPart):
             # Only reachable for malformed input (a tool call in a non-assistant turn --
             # valid Anthropic conversations never put one here). Best-effort text stub,
@@ -72,7 +105,9 @@ def _convert_parts_to_langchain(parts: list[Part]) -> list[dict]:
     return result
 
 
-def _tool_result_content_to_langchain(content: list[TextPart | ImagePart]) -> str | list[dict]:
+def _tool_result_content_to_langchain(
+    content: list[TextPart | ImagePart | DocumentPart | SearchResultPart],
+) -> str | list[dict]:
     """Convert a ToolResultPart's content to LangChain ToolMessage content.
 
     Text-only content (the common case) stays a plain string, matching today's shape.
@@ -89,6 +124,10 @@ def _tool_result_content_to_langchain(content: list[TextPart | ImagePart]) -> st
                 "type": "image_url",
                 "image_url": {"url": f"data:{p.media_type};base64,{p.data}"},
             })
+        elif isinstance(p, DocumentPart):
+            parts.append({"type": "text", "text": _document_as_text(p)})
+        elif isinstance(p, SearchResultPart):
+            parts.append({"type": "text", "text": _search_result_as_text(p)})
     if not parts:
         return ""
     if all(p["type"] == "text" for p in parts):
@@ -141,9 +180,9 @@ def to_langchain_messages(request: InternalRequest) -> list[BaseMessage]:
                     # read it, so there's no content actually being lost here.
                     continue
                 elif isinstance(part, DocumentPart):
-                    raise UnsupportedContentError(
-                        "Document content is not supported by the OpenAI-compatible provider."
-                    )
+                    text_parts.append(_document_as_text(part))
+                elif isinstance(part, SearchResultPart):
+                    text_parts.append(_search_result_as_text(part))
                 elif isinstance(part, (ServerToolCallPart, ServerToolResultPart)):
                     raise ServerToolError(
                         "Server-side tools cannot be proxied through the OpenAI-compatible provider. "

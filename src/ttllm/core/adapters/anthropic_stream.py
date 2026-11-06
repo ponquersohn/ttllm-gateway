@@ -21,7 +21,7 @@ import json
 import uuid
 from typing import Any, AsyncIterator
 
-from ttllm.core.adapters.anthropic import _part_to_block
+from ttllm.core.adapters.anthropic import _part_to_block, citation_to_wire
 from ttllm.core.model import ChunkKind, InternalChunk
 from ttllm.schemas.anthropic import MessagesResponse, Usage
 
@@ -92,6 +92,14 @@ async def encode_anthropic_sse(
                 "index": chunk.index,
                 "delta": {"type": "signature_delta", "signature": chunk.signature or ""},
             })
+
+        elif chunk.kind == ChunkKind.CITATION_DELTA:
+            if chunk.citation is not None:
+                yield _sse_event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": chunk.index,
+                    "delta": {"type": "citations_delta", "citation": citation_to_wire(chunk.citation)},
+                })
 
         elif chunk.kind == ChunkKind.BLOCK_STOP:
             open_blocks.discard(chunk.index)
