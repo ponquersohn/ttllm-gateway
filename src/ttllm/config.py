@@ -31,6 +31,12 @@ class EngineConfig(BaseModel):
     cors_origins: list[str] = ["*"]
     log_request_bodies: bool = False
     rules_cache_ttl_seconds: int = 30
+    # How long a reserve/settle waits on a bucket row lock before answering 529.
+    quota_lock_timeout_ms: int = 5000
+    # A reservation stops counting as in-flight after this long (crashed-worker backstop).
+    quota_reservation_ttl_seconds: int = 900
+    # Expired reservations are kept this long so a stream outliving the TTL is still charged.
+    quota_reservation_retention_seconds: int = 86400
 
 
 class JWTConfig(BaseModel):

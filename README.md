@@ -157,6 +157,9 @@ dev:
     cors_origins: ["*"]
     log_request_bodies: false
     rules_cache_ttl_seconds: 30          # how long each worker caches active rules before reloading
+    quota_lock_timeout_ms: 5000          # wait for a quota bucket lock before answering 529
+    quota_reservation_ttl_seconds: 900   # when an unfinished request stops counting against a quota
+    quota_reservation_retention_seconds: 86400  # when an expired reservation is deleted
   auth:
     allowed_redirect_origins:
       - "https://myapp.example.com"
@@ -184,7 +187,7 @@ The gateway includes a rules engine that evaluates incoming requests before mode
 
 Rules are managed via the admin API (`/admin/rules`) and CLI (`ttllm rules`). Each worker caches active rules in memory. The worker that serves a create/update/delete reloads immediately; other workers pick up the change within `engine.rules_cache_ttl_seconds` (default 30s), so a write may take up to that long to take effect across all workers.
 
-> 📖 For the full reference — conditions, actions, the quota system, message templating, and operational notes — see [docs/rules-engine.md](docs/rules-engine.md).
+> 📖 For the full reference — conditions, actions, message templating, and operational notes — see [docs/rules-engine.md](docs/rules-engine.md). For limits on requests, tokens, and spend, see [Quotas](#quotas).
 
 ### Permissions
 
@@ -216,6 +219,7 @@ DELETE /admin/rules/{rule_id}
 ttllm rules list
 ttllm rules show <name>
 ttllm rules create --name <name> --conditions '<json>' --action '<json>' --weight 50
+ttllm rules create --name <name> --conditions '<json>' --apply-quota <quota>
 ttllm rules update <name> --weight 100 --enabled true
 ttllm rules delete <name>
 ```
@@ -268,21 +272,16 @@ POST /admin/rules
   "action": {"type": "rewrite", "pattern": "\\d{3}-\\d{2}-\\d{4}", "replacement": "[SSN-REDACTED]"}
 }
 
-// Throttle spend: block with 429 once a user exceeds $5 in any rolling 60s window
+// Attach a quota to everyone in a group
 {
-  "name": "cost-throttle-60s",
-  "weight": 100,
+  "name": "apply-eng-budget",
   "conditions": {
     "logic": "and",
     "conditions": [
-      {"type": "quota", "field": "cost", "operator": "gt", "value": 5.0, "window": 60}
+      {"type": "subject", "field": "group", "value": "engineering"}
     ]
   },
-  "action": {
-    "type": "block",
-    "status_code": 429,
-    "message": "Spend limit hit ({{quota.cost.value}}/{{quota.cost.threshold}} USD in 60s). Retry in {{quota.cost.next_free}}s."
-  }
+  "action": {"type": "apply_quota", "quota_ids": ["<quota id>"]}
 }
 ```
 
@@ -290,26 +289,11 @@ POST /admin/rules
 
 | Type | Field | Description |
 |------|-------|-------------|
-| `parameter` | `model`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stream` | Match on request parameters |
+| `parameter` | `model`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stream`, `resolved_model` (`apply_quota` rules only) | Match on request parameters |
 | `header` | any header name | Match on HTTP headers (case-insensitive) |
 | `content` | `messages` or `system` | Match on message/system text |
 | `function` | `count_tokens`, `message_length`, `keyword_count` | Match on computed values |
-| `quota` | `cost`, `tokens`, `requests` | Match on the user's usage in a rolling time window (see below) |
-
-### Quota Conditions
-
-A `quota` condition compares the caller's recent usage against a threshold over a
-moving time window, computed in real time from the audit log (only successful
-requests count). It takes two extra fields:
-
-- `window` (required) — window size in seconds (e.g. `60` = last 60 seconds).
-- `per` (optional) — scope dimensions; currently only `["model"]`, which limits
-  the aggregate to the request's model (exact name match). Default scope is
-  per-user. Combine a `quota` condition with normal conditions in an `and` group
-  for finer targeting.
-
-`field` selects the measure: `cost` (USD spent), `tokens` (input+output), or
-`requests` (count). Use the numeric operators (`gt`/`gte`/`lt`/`lte`).
+| `subject` | `user_id`, `user_email`, `token_id`, `group` | Match on the authenticated caller, which clients can't influence |
 
 ### Operators
 
@@ -322,29 +306,41 @@ All conditions support `negate: true` to invert the match.
 | Action | Fields | Description |
 |--------|--------|-------------|
 | `reroute` | `target` | Change target model name before resolution |
-| `block` | `message`, `status_code` | Reject the request. `status_code` defaults to 403; set `429` for rate limiting (a `Retry-After` header is added when a quota window is involved) |
+| `block` | `message`, `status_code` | Reject the request. `status_code` defaults to 403 |
 | `allow` | — | Explicitly pass through (skip remaining rules) |
 | `rewrite` | `pattern`, `replacement` | Regex replace in message content |
-
-### Block Message Templating
-
-A `block` action's `message` supports `{{ dotted.path }}` substitution against
-values published by the matched rule's conditions. Quota conditions expose a
-`quota.<measure>` namespace with `value`, `threshold`, `window`, and `next_free`
-(seconds until the oldest contributing usage ages out of the window — also used
-for the `Retry-After` header). Unknown references are left untouched. Only dotted
-lookups are supported — no expressions or filters. Example:
-
-```
-"Spend limit hit ({{quota.cost.value}}/{{quota.cost.threshold}} USD). Retry in {{quota.cost.next_free}}s."
-```
-
-> Note: a rule with two quota conditions on the *same* measure but different
-> windows is not yet supported (they share one `quota.<measure>` namespace).
+| `apply_quota` | `quota_ids` | Attach [quotas](#quotas). Not terminal: every matching rule applies, and no other rule can skip it |
 
 ### Condition Groups
 
 Conditions can be composed with `logic: and` or `logic: or`, and groups can be nested for complex rules.
+
+## Quotas
+
+Quotas limit requests, tokens, or spend per interval. They're defined separately and attached by rules with the `apply_quota` action. For example, to limit every user to $50 a day:
+
+```bash
+ttllm quotas create --name daily-spend --measure cost --limit 50 --window day
+ttllm rules create --name apply-daily-spend \
+  --conditions '{"logic":"and","conditions":[]}' \
+  --apply-quota daily-spend
+```
+
+- **Windows:** calendar (`hour`, `day`, `week`, `month`, in a timezone), or a session of any length that starts at the first request.
+- **Dimensions:** per `user`, `model`, `token`, or any combination; none means one shared budget.
+- **Enforcement:** usage is reserved before the provider call, so parallel requests can't get around a limit. `soft` (the default) can overshoot by about one request; `strict` never exceeds the limit.
+- **When exceeded:** block (a `429` with an exact `Retry-After`) or reroute to another model.
+
+```bash
+ttllm quotas list|show|create|update|delete
+ttllm quotas buckets <name>     # current usage per bucket
+ttllm quotas reset <name>       # discard all usage
+ttllm me quotas                 # your own standing
+```
+
+Upgrading from the old rolling-window `quota` condition: those rules are disabled by migration 020 and **their limits aren't enforced until recreated**. See the [upgrade notes](docs/quotas.md#upgrading-from-rolling-window-quota-rules).
+
+> 📖 For the full reference, see [docs/quotas.md](docs/quotas.md).
 
 ## Secrets Management
 
@@ -489,7 +485,7 @@ ttllm models update claude-sonnet --config '{"region":"eu-west-1"}' --merge-conf
 
 This shallow-merges the provided keys into the existing config. Without `--merge-config`, `--config` replaces the entire config object.
 
-The total cost of each request is computed by its provider (the cost shape is provider-specific — Bedrock bills input + output + cache read/write) and stored authoritatively on the audit row, alongside a `provider_metadata` JSONB blob holding the raw usage payload and the per-component cost breakdown. Usage aggregation (`ttllm usage summary` / `costs`) sums the stored totals rather than recomputing, so reported costs always match what was recorded — including cache and any future cost dimensions. `ttllm usage summary` reports an overall `total_cost`.
+The total cost of each request is computed by its provider (the cost shape is provider-specific — Bedrock bills input + output + cache read/write) and stored authoritatively on the audit row, alongside a `provider_metadata` JSONB blob holding the raw usage payload and the per-component cost breakdown. Usage aggregation (`ttllm usage summary` / `costs`) sums the stored totals rather than recomputing, so reported costs always match what was recorded — including cache and any future cost dimensions. `ttllm usage summary` reports an overall `total_cost`. Requests denied by a quota are left out of every usage figure and reported separately as `quota_blocked_requests`.
 
 ## Bedrock Model Config
 
@@ -527,7 +523,7 @@ ttllm secrets list|show|create|update|delete
 ttllm usage summary|costs [--user] [--email] [--model] [--since] [--until]
 ttllm usage by-user [--limit] [--since] [--until]   # usage per user, highest cost first
 ttllm reports generate [--user] [--since] [--until] [--format pdf|html] [-o file]  # preview
-ttllm audit-logs [--user] [--model] [--limit]
+ttllm audit-logs [--user] [--model] [--request-id] [--limit]
 ```
 
 Every command accepts `--json` for machine-readable output instead of formatted tables/text — including mutations (`create`/`update`/`delete`/`assign`/...). Commands that create or update a resource emit the resource object; delete/revoke commands (which return HTTP 204) emit a small status object such as `{"status": "deleted", "id": "..."}`.

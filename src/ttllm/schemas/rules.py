@@ -2,35 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+import uuid
+from typing import Annotated, Any, Iterator, Literal
 
-from pydantic import BaseModel, Discriminator, Tag, TypeAdapter, field_validator, model_validator
+from pydantic import BaseModel, Discriminator, Field, Tag, TypeAdapter, field_validator, model_validator
 
-_QUOTA_MEASURES = {"cost", "tokens", "requests"}
+_SUBJECT_FIELDS = {"user_id", "user_email", "token_id", "group"}
 
 
 class ConditionSchema(BaseModel):
-    type: Literal["header", "parameter", "content", "function", "quota"]
+    type: Literal["header", "parameter", "content", "function", "subject"]
     field: str
     operator: Literal["exact", "regex", "gt", "lt", "gte", "lte", "contains", "in"] = "exact"
     value: Any
     negate: bool = False
-    # Quota conditions only.
-    window: int | None = None
-    per: list[str] = []
 
     @model_validator(mode="after")
-    def _validate_quota(self) -> "ConditionSchema":
-        if self.type == "quota":
-            if self.field not in _QUOTA_MEASURES:
-                raise ValueError(
-                    f"quota condition field must be one of {sorted(_QUOTA_MEASURES)}"
-                )
-            if self.window is None or self.window <= 0:
-                raise ValueError("quota condition requires a positive 'window' (seconds)")
-            invalid = set(self.per) - {"model"}
-            if invalid:
-                raise ValueError(f"unsupported quota 'per' dimensions: {sorted(invalid)}")
+    def _validate_subject(self) -> "ConditionSchema":
+        if self.type == "subject" and self.field not in _SUBJECT_FIELDS:
+            raise ValueError(f"subject condition field must be one of {sorted(_SUBJECT_FIELDS)}")
         return self
 
 
@@ -77,6 +67,11 @@ class RewriteActionSchema(BaseModel):
         return v
 
 
+class ApplyQuotaActionSchema(BaseModel):
+    type: Literal["apply_quota"] = "apply_quota"
+    quota_ids: list[uuid.UUID] = Field(min_length=1)
+
+
 def _get_action_type(v: Any) -> str:
     if isinstance(v, dict):
         return v.get("type", "block")
@@ -87,7 +82,8 @@ ActionSchema = Annotated[
     Annotated[RerouteActionSchema, Tag("reroute")]
     | Annotated[BlockActionSchema, Tag("block")]
     | Annotated[AllowActionSchema, Tag("allow")]
-    | Annotated[RewriteActionSchema, Tag("rewrite")],
+    | Annotated[RewriteActionSchema, Tag("rewrite")]
+    | Annotated[ApplyQuotaActionSchema, Tag("apply_quota")],
     Discriminator(_get_action_type),
 ]
 
@@ -120,3 +116,29 @@ def validate_condition_group_dict(value: dict) -> dict:
     """Validate a raw condition-group dict against ConditionGroupSchema."""
     ConditionGroupSchema(**value)
     return value
+
+
+def iter_condition_dicts(group: dict) -> Iterator[dict]:
+    """Yield every leaf condition of a raw condition-group dict, at any nesting depth."""
+    for item in group.get("conditions", []):
+        if "conditions" in item:
+            yield from iter_condition_dicts(item)
+        else:
+            yield item
+
+
+def validate_rule_definition(conditions: dict, action: dict) -> None:
+    """Checks spanning a rule's conditions and action together; raises ValueError.
+
+    Also re-validates both parts, so stored JSON written before a schema change (such as
+    a disabled rule with the removed ``quota`` condition) can't be re-enabled as-is.
+    """
+    validate_condition_group_dict(conditions)
+    validate_action_dict(action)
+    if action.get("type") != "apply_quota":
+        for cond in iter_condition_dicts(conditions):
+            if cond.get("type") == "parameter" and cond.get("field") == "resolved_model":
+                raise ValueError(
+                    "resolved_model is only known once the model is resolved, "
+                    "so it can only be used on apply_quota rules"
+                )

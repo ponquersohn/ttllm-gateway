@@ -47,6 +47,42 @@ def me_models():
     console.print(table)
 
 
+@app.command("quotas")
+def me_quotas():
+    """Show your standing against the quotas that apply to you."""
+    with get_client() as client:
+        data = handle_response(client.get("/me/quotas"))
+
+    if json_mode():
+        print_json(data)
+        return
+
+    if not data:
+        console.print("[yellow]No quotas apply to you.[/yellow]")
+        return
+
+    table = Table(title="My Quotas")
+    table.add_column("Quota")
+    table.add_column("Model")
+    table.add_column("Measure")
+    table.add_column("Used")
+    table.add_column("Limit")
+    table.add_column("Remaining")
+    table.add_column("Resets")
+
+    for q in data:
+        table.add_row(
+            q["quota_name"],
+            q["dimension_values"].get("model_name", ""),
+            q["measure"],
+            q["used"],
+            q["limit"],
+            q["remaining"],
+            q["window_end"] or "",
+        )
+    console.print(table)
+
+
 @tokens_app.command("list")
 @tokens_app.callback(invoke_without_command=True)
 def me_tokens_list():
@@ -149,6 +185,8 @@ def me_usage_summary(
 
     console.print("[bold]My Usage Summary[/bold]")
     console.print(f"  Total requests: {data['total_requests']}")
+    if data.get("quota_blocked_requests"):
+        console.print(f"  Blocked by quota: {data['quota_blocked_requests']}")
     console.print(f"  Total input tokens: {data['total_input_tokens']}")
     console.print(f"  Total output tokens: {data['total_output_tokens']}")
     console.print(f"  Avg latency: {data['avg_latency_ms']}ms")

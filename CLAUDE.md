@@ -13,7 +13,7 @@ LLM gateway exposing an Anthropic-compatible API (`POST /v1/messages`), routing 
 - **API**: FastAPI + Pydantic v2
 - **Database**: PostgreSQL 16 via SQLAlchemy 2.0 (async) + asyncpg
 - **Migrations**: Alembic
-- **LLM**: LangChain (langchain-core, langchain-aws)
+- **LLM**: LangChain (langchain-core, langchain-aws, langchain-openai)
 - **Deployment**: Docker (ECS via Uvicorn, Lambda via Mangum)
 - **CLI**: Typer + Rich
 
@@ -39,10 +39,11 @@ ttllm models list|show|create|update|delete|assign|unassign
 ttllm groups list|show|create|update|delete
 ttllm tokens list|show|create|delete
 ttllm rules list|show|create|update|delete
+ttllm quotas list|show|create|update|delete|buckets|reset
 ttllm secrets list|show|create|update|delete
 ttllm usage summary|costs [--user] [--email] [--model] [--since] [--until]
 ttllm usage by-user [--limit] [--since] [--until]
-ttllm audit-logs [--user] [--model] [--limit]
+ttllm audit-logs [--user] [--model] [--request-id] [--limit]
 ```
 
 ## Configuration
@@ -86,26 +87,27 @@ Local overrides via `local.config.yaml` (git-ignored).
 src/ttllm/
 ├── config.py          # Settings (pydantic-settings)
 ├── db.py              # Async engine + session factory
-├── models/            # SQLAlchemy ORM (users, auth, llm_models, model_assignments, audit_logs, audit_log_bodies)
+├── models/            # SQLAlchemy ORM (users, auth, llm_models, model_assignments, audit_logs, audit_log_bodies, quota)
 ├── schemas/           # Pydantic v2 (anthropic.py = wire format, auth.py, admin.py, common.py)
-├── core/              # Pure logic (permissions, jwt, oidc, password, gateway, model, errors)
+├── core/              # Pure logic (permissions, jwt, oidc, password, gateway, model, errors, rules, quota)
 │   ├── model.py        # Internal representation: InternalRequest/InternalResult/InternalChunk, the Part union
 │   ├── errors.py        # UnsupportedContentError, ServerToolError
 │   ├── adapters/        # Input-API wire format <-> internal representation (anthropic.py, anthropic_stream.py)
 │   └── providers/       # base.py (ProviderState/BaseProvider ABCs) + one subpackage per provider:
 │       ├── bedrock/      # provider.py (BedrockProvider/BedrockState), converse.py (Bedrock Converse wire translation)
 │       └── langchain/    # provider.py (LangChainProvider/LangChainState), translation.py (LangChain message translation), registry.py (ChatOpenAI factory cache)
-├── services/          # DB operations (user, auth, group, model, audit, usage)
+├── services/          # DB operations (user, auth, group, model, audit, usage, rules, quota)
 ├── api/               # FastAPI (app.py, deps.py, auth.py, messages.py, admin.py)
 ├── handlers/          # Lambda (mangum) + ECS (uvicorn) entrypoints
 └── cli/               # Typer CLI (main.py)
 ```
 
 ## Database
-13 tables: `users`, `llm_models`, `model_assignments`, `group_model_assignments`, `audit_logs`, `audit_log_bodies`, `groups`, `group_permissions`, `user_permissions`, `user_groups`, `gateway_tokens`, `refresh_tokens`, `secrets`, `rules`
+Main tables: `users`, `llm_models`, `model_assignments`, `group_model_assignments`, `audit_logs`, `audit_log_bodies`, `groups`, `group_permissions`, `user_permissions`, `user_groups`, `gateway_tokens`, `refresh_tokens`, `secrets`, `rules`, `quotas`, `quota_buckets`, `quota_reservations`
 - JWT-based auth with OIDC identity provider support (e.g. Entra ID)
 - RBAC via groups and direct user permission assignments
 - Gateway tokens are registered in DB for revocation; refresh tokens stored as SHA-256 hashes
 - Audit log bodies are in a separate table to keep the main audit table lean (streaming requests persist their assembled response body too, when `log_request_bodies` is on)
 - `audit_logs` has two JSONB columns: `metadata_json` (HTTP/client context — client_ip, user_agent) and `provider_metadata` (the provider's blob — raw usage payload, cost breakdown, latency, stop reason). `total_cost` is the authoritative provider-computed total; usage aggregation sums it rather than recomputing.
+- Quotas (`docs/quotas.md`) are enforced from `quota_buckets`, not aggregated from the audit log. `reserve` locks buckets in one short transaction committed before the provider call, and `settle` replaces the reservation with actual usage in the audit row's transaction. In-flight usage is always the sum of unexpired `quota_reservations`, never a stored counter
 - All PKs are UUIDs, all timestamps are timezone-aware

@@ -8,10 +8,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 
 from ttllm.api.deps import AuthContext, DB, get_authenticated
-from ttllm.schemas.admin import CostBreakdownItem, UsageSummaryResponse, WhoamiResponse
+from ttllm.schemas.admin import CostBreakdownItem, QuotaBucketResponse, UsageSummaryResponse, WhoamiResponse
 from ttllm.schemas.auth import TokenCreatedResponse, TokenResponse
 from ttllm.schemas.me import AvailableModelResponse, SelfTokenCreate
-from ttllm.services import auth_service, group_service, model_service, usage_service
+from ttllm.services import auth_service, group_service, model_service, quota_service, usage_service
 
 router = APIRouter(tags=["me"])
 
@@ -123,3 +123,16 @@ async def get_my_costs(
     return await usage_service.get_cost_breakdown(
         db, user_id=ctx.user.id, since=since, until=until
     )
+
+
+@router.get("/me/quotas", response_model=list[QuotaBucketResponse])
+async def get_my_quotas(
+    db: DB,
+    ctx: AuthContext = Depends(get_authenticated),
+):
+    """Current standing against the quotas that apply to you. Read-only.
+
+    Rules matching on request content can't be evaluated here, so those are best-effort.
+    """
+    views = await quota_service.statuses_for_user(db, ctx.user, ctx.jti)
+    return [QuotaBucketResponse(**v) for v in views]

@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import ValidationError
 from sqlalchemy import text
 
 from ttllm import __version__
@@ -22,6 +23,11 @@ from ttllm.schemas.admin import (
     ModelCreate,
     ModelResponse,
     ModelUpdate,
+    QuotaBucketResponse,
+    QuotaDefinition,
+    QuotaResetResponse,
+    QuotaResponse,
+    QuotaUpdate,
     RuleCreate,
     RuleResponse,
     RuleUpdate,
@@ -49,7 +55,7 @@ from ttllm.schemas.auth import (
     UserPermissionAssign,
 )
 from ttllm.schemas.common import PaginatedResponse
-from ttllm.services import admin_audit_service, audit_service, auth_service, group_service, model_service, rules_service, secret_service, usage_service, user_service
+from ttllm.services import admin_audit_service, audit_service, auth_service, group_service, model_service, quota_service, rules_service, secret_service, usage_service, user_service
 from ttllm.api.me import _build_whoami
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -902,6 +908,7 @@ async def list_audit_logs(
     ctx: AuthContext = Depends(require_permission(Permissions.AUDIT_VIEW)),
     user_id: uuid.UUID | None = None,
     model_id: uuid.UUID | None = None,
+    request_id: uuid.UUID | None = Query(None, description="The X-Request-Id returned to the client"),
     since: datetime | None = None,
     until: datetime | None = None,
     offset: int = Query(0, ge=0),
@@ -911,6 +918,7 @@ async def list_audit_logs(
         db,
         user_id=user_id,
         model_id=model_id,
+        request_id=request_id,
         since=since,
         until=until,
         offset=offset,
@@ -964,15 +972,18 @@ async def create_rule(
     db: DB,
     ctx: AuthContext = Depends(require_permission(Permissions.RULE_CREATE)),
 ):
-    rule = await rules_service.create_rule(
-        db,
-        name=body.name,
-        conditions=body.conditions,
-        action=body.action,
-        description=body.description,
-        weight=body.weight,
-        enabled=body.enabled,
-    )
+    try:
+        rule = await rules_service.create_rule(
+            db,
+            name=body.name,
+            conditions=body.conditions,
+            action=body.action,
+            description=body.description,
+            weight=body.weight,
+            enabled=body.enabled,
+        )
+    except rules_service.RuleValidationError as exc:
+        raise HTTPException(422, detail={"type": "validation_error", "message": str(exc)})
     await admin_audit_service.log(
         db,
         actor=ctx.user,
@@ -1004,9 +1015,12 @@ async def update_rule(
     db: DB,
     ctx: AuthContext = Depends(require_permission(Permissions.RULE_MODIFY)),
 ):
-    rule = await rules_service.update_rule(
-        db, rule_id, **body.model_dump(exclude_unset=True)
-    )
+    try:
+        rule = await rules_service.update_rule(
+            db, rule_id, **body.model_dump(exclude_unset=True)
+        )
+    except rules_service.RuleValidationError as exc:
+        raise HTTPException(422, detail={"type": "validation_error", "message": str(exc)})
     if not rule:
         raise HTTPException(404, detail={"type": "not_found", "message": "Rule not found"})
     await admin_audit_service.log(
@@ -1038,3 +1052,153 @@ async def delete_rule(
         resource_type="rule",
         resource_id=rule_id,
     )
+
+
+# --- Quotas ---
+
+
+async def _require_quota(db: DB, quota_id: uuid.UUID):
+    quota = await quota_service.get_quota(db, quota_id)
+    if not quota:
+        raise HTTPException(404, detail={"type": "not_found", "message": "Quota not found"})
+    return quota
+
+
+@router.get("/quotas", response_model=PaginatedResponse[QuotaResponse])
+async def list_quotas(
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_VIEW)),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    quotas, total = await quota_service.list_quotas(db, offset=offset, limit=limit)
+    return PaginatedResponse(
+        items=[QuotaResponse.model_validate(q) for q in quotas],
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post("/quotas", response_model=QuotaResponse, status_code=201)
+async def create_quota(
+    body: QuotaDefinition,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_CREATE)),
+):
+    if await quota_service.get_quota_by_name(db, body.name):
+        raise HTTPException(409, detail={"type": "conflict", "message": f"Quota '{body.name}' already exists"})
+    quota = await quota_service.create_quota(db, **body.model_dump(exclude_none=False))
+    await admin_audit_service.log(
+        db,
+        actor=ctx.user,
+        actor_jti=ctx.jti,
+        action="quota.create",
+        resource_type="quota",
+        resource_id=quota.id,
+        details={"name": body.name},
+    )
+    return QuotaResponse.model_validate(quota)
+
+
+@router.get("/quotas/{quota_id}", response_model=QuotaResponse)
+async def get_quota(
+    quota_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_VIEW)),
+):
+    return QuotaResponse.model_validate(await _require_quota(db, quota_id))
+
+
+@router.patch("/quotas/{quota_id}", response_model=QuotaResponse)
+async def update_quota(
+    quota_id: uuid.UUID,
+    body: QuotaUpdate,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_MODIFY)),
+):
+    quota = await _require_quota(db, quota_id)
+    changes = body.model_dump(exclude_unset=True)
+    current = {field: getattr(quota, field) for field in QuotaDefinition.model_fields}
+    try:
+        merged = QuotaDefinition.model_validate({**current, **changes})
+    except ValidationError as exc:
+        raise HTTPException(422, detail={"type": "validation_error", "message": str(exc)})
+    if merged.name != quota.name and await quota_service.get_quota_by_name(db, merged.name):
+        raise HTTPException(409, detail={"type": "conflict", "message": f"Quota '{merged.name}' already exists"})
+
+    quota = await quota_service.update_quota(db, quota, merged.model_dump())
+    await admin_audit_service.log(
+        db,
+        actor=ctx.user,
+        actor_jti=ctx.jti,
+        action="quota.update",
+        resource_type="quota",
+        resource_id=quota_id,
+        details={"changed_fields": sorted(changes)},
+    )
+    return QuotaResponse.model_validate(quota)
+
+
+@router.delete("/quotas/{quota_id}", status_code=204)
+async def delete_quota(
+    quota_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_DELETE)),
+):
+    quota = await _require_quota(db, quota_id)
+    name = quota.name
+    try:
+        await quota_service.delete_quota(db, quota)
+    except quota_service.QuotaInUseError as exc:
+        raise HTTPException(
+            409,
+            detail={"type": "conflict", "message": f"Quota '{name}' is used by rules: {exc}"},
+        )
+    await admin_audit_service.log(
+        db,
+        actor=ctx.user,
+        actor_jti=ctx.jti,
+        action="quota.delete",
+        resource_type="quota",
+        resource_id=quota_id,
+        details={"name": name},
+    )
+
+
+@router.get("/quotas/{quota_id}/buckets", response_model=PaginatedResponse[QuotaBucketResponse])
+async def list_quota_buckets(
+    quota_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_VIEW)),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    quota = await _require_quota(db, quota_id)
+    buckets, total = await quota_service.list_buckets(db, quota, offset=offset, limit=limit)
+    return PaginatedResponse(
+        items=[QuotaBucketResponse(**b) for b in buckets],
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post("/quotas/{quota_id}/reset", response_model=QuotaResetResponse)
+async def reset_quota(
+    quota_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(require_permission(Permissions.QUOTA_MODIFY)),
+):
+    await _require_quota(db, quota_id)
+    count = await quota_service.reset_quota(db, quota_id)
+    await admin_audit_service.log(
+        db,
+        actor=ctx.user,
+        actor_jti=ctx.jti,
+        action="quota.reset",
+        resource_type="quota",
+        resource_id=quota_id,
+        details={"buckets_reset": count},
+    )
+    return QuotaResetResponse(buckets_reset=count)
