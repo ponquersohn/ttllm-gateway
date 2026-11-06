@@ -16,6 +16,7 @@ from ttllm.core.model import (
     InternalMessage,
     InternalRequest,
     RedactedThinkingPart,
+    SearchResultPart,
     ServerToolCallPart,
     ServerToolResultPart,
     ServerToolSpec,
@@ -252,6 +253,29 @@ class TestBuildConverseRequest:
         assert tr_content[1]["image"]["format"] == "png"
         assert isinstance(tr_content[1]["image"]["source"]["bytes"], bytes)
 
+    def test_tool_result_with_document_content(self):
+        messages = [
+            InternalMessage(
+                role="user",
+                content=[
+                    ToolResultPart(
+                        tool_call_id="tu_1",
+                        content=[
+                            TextPart(text="PDF file read"),
+                            DocumentPart(media_type="application/pdf", data="aWdub3Jl"),
+                        ],
+                    ),
+                ],
+            )
+        ]
+        result = build_converse_request(_make_request(messages=messages), _make_model())
+        tr_content = result["messages"][0]["content"][0]["toolResult"]["content"]
+
+        assert tr_content[0] == {"text": "PDF file read"}
+        assert tr_content[1]["document"]["format"] == "pdf"
+        assert tr_content[1]["document"]["name"] == "document"
+        assert tr_content[1]["document"]["source"]["bytes"] == b"ignore"
+
     def test_thinking_part_conversion(self):
         messages = [
             InternalMessage(
@@ -284,7 +308,8 @@ class TestBuildConverseRequest:
 
         content = result["messages"][0]["content"]
         assert content[0]["document"]["format"] == "pdf"
-        assert content[0]["document"]["name"] == "report.pdf"
+        # Converse only allows alphanumerics, spaces, -()[] in document names.
+        assert content[0]["document"]["name"] == "report pdf"
 
     def test_redacted_thinking_dropped(self):
         # Bedrock has no equivalent for redacted-thinking content -- Anthropic itself
@@ -1129,3 +1154,138 @@ class TestSafeguards:
         assert list(stop.safeguard_results[0]["status"]["tool_uses"]) == ["tooluse_A"]
         assert state.get_response().safeguard_results == stop.safeguard_results
         assert state.get_metadata()["safeguard_results"] == stop.safeguard_results
+
+
+def _doc_msg(*parts):
+    return [InternalMessage(role="user", content=list(parts))]
+
+
+class TestCompatibility:
+    def _content(self, *parts):
+        return build_converse_request(_make_request(messages=_doc_msg(*parts)), _make_model())["messages"][0]["content"]
+
+    @pytest.mark.parametrize("mime,fmt", [
+        ("application/pdf", "pdf"), ("text/plain", "txt"), ("text/markdown", "md"), ("text/csv", "csv"),
+        ("text/html", "html"),
+        ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
+    ])
+    def test_document_format_table(self, mime, fmt):
+        assert self._content(DocumentPart(media_type=mime, data="aWdub3Jl"))[0]["document"]["format"] == fmt
+
+    def test_unknown_document_mime_is_400(self):
+        from ttllm.core.errors import UnsupportedContentError
+        with pytest.raises(UnsupportedContentError, match="application/zip"):
+            self._content(DocumentPart(media_type="application/zip", data="aWdub3Jl"))
+
+    def test_image_jpg_normalized_and_bad_format_rejected(self):
+        from ttllm.core.errors import UnsupportedContentError
+        assert self._content(ImagePart(media_type="image/jpg", data="aWdub3Jl"))[0]["image"]["format"] == "jpeg"
+        with pytest.raises(UnsupportedContentError):
+            self._content(ImagePart(media_type="image/tiff", data="aWdub3Jl"))
+
+    def test_text_and_content_sources_with_context_and_citations(self):
+        content = self._content(
+            DocumentPart(source_kind="text", media_type="text/plain", text="hello", context="ctx", citations=True),
+            DocumentPart(source_kind="content", content=[TextPart(text="a"), TextPart(text="b")], citations=True),
+        )
+        assert content[0]["document"]["source"] == {"text": "hello"}
+        assert content[0]["document"]["context"] == "ctx"
+        assert content[0]["document"]["citations"] == {"enabled": True}
+        assert content[1]["document"]["source"] == {"content": [{"text": "a"}, {"text": "b"}]}
+
+    def test_text_and_content_sources_without_citations_sent_as_bytes(self):
+        # Converse rejects source.text/source.content unless citations are enabled.
+        content = self._content(
+            DocumentPart(source_kind="text", media_type="text/plain", text="hello"),
+            DocumentPart(source_kind="content", content=[TextPart(text="a"), TextPart(text="b")]),
+        )
+        assert content[0]["document"]["source"] == {"bytes": b"hello"}
+        assert content[1]["document"]["source"] == {"bytes": b"a\n\nb"}
+        assert content[1]["document"]["format"] == "txt"
+        assert "citations" not in content[1]["document"]
+
+    def test_empty_tool_description_omitted(self):
+        req = _make_request(tools=[ToolSpec(name="t", input_schema={"type": "object"})])
+        spec = build_converse_request(req, _make_model())["toolConfig"]["tools"][0]["toolSpec"]
+        assert "description" not in spec
+
+    def test_document_names_sanitized_and_deduped(self):
+        content = self._content(
+            DocumentPart(media_type="application/pdf", data="aWdub3Jl"),
+            ToolResultPart(tool_call_id="t", content=[DocumentPart(media_type="application/pdf", data="aWdub3Jl")]),
+            DocumentPart(media_type="application/pdf", data="aWdub3Jl", title="q3_report.final!!"),
+        )
+        assert content[0]["document"]["name"] == "document"
+        assert content[1]["toolResult"]["content"][0]["document"]["name"] == "document (2)"
+        assert content[2]["document"]["name"] == "q3 report final"
+
+    def test_search_result_top_level_and_in_tool_result(self):
+        sr = SearchResultPart(source="https://kb/1", title="KB", content=[TextPart(text="fact")], citations=True)
+        content = self._content(sr, ToolResultPart(tool_call_id="t", content=[sr]))
+        expected = {"searchResult": {"source": "https://kb/1", "title": "KB", "content": [{"text": "fact"}],
+                                     "citations": {"enabled": True}}}
+        assert content[0] == expected
+        assert content[1]["toolResult"]["content"][0] == expected
+
+    def test_tool_schema_passed_through_verbatim(self):
+        schema = {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}, "required": [],
+                  "$defs": {"A": {"type": "string"}}, "additionalProperties": False}
+        req = _make_request(tools=[ToolSpec(name="t", input_schema=schema)])
+        sent = build_converse_request(req, _make_model())["toolConfig"]["tools"][0]["toolSpec"]["inputSchema"]["json"]
+        assert sent == {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}},
+                        "$defs": {"A": {"type": "string"}}, "additionalProperties": False}
+
+    def test_citations_content_parsed(self):
+        response = {
+            "output": {"message": {"content": [
+                {"text": "Per the doc, "},
+                {"citationsContent": {
+                    "content": [{"text": "the sky is blue."}],
+                    "citations": [{
+                        "title": "Notes",
+                        "sourceContent": [{"text": "The sky is blue"}],
+                        "location": {"documentChar": {"documentIndex": 0, "start": 0, "end": 15}},
+                    }],
+                }},
+            ]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1, "outputTokens": 1},
+        }
+        parts = parse_converse_response(response).content
+        assert parts[1].text == "the sky is blue."
+        c = parts[1].citations[0]
+        assert (c.kind, c.cited_text, c.document_index, c.document_title, c.start, c.end) == (
+            "char", "The sky is blue", 0, "Notes", 0, 15)
+
+    @pytest.mark.asyncio
+    async def test_streaming_citation_delta(self):
+        from ttllm.core.providers.bedrock.converse import stream_converse_chunks
+        from ttllm.core.providers.bedrock.provider import BedrockState
+
+        events = [
+            {"messageStart": {"role": "assistant"}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Blue."}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"citation": {
+                "title": "KB", "source": "https://kb/1", "sourceContent": [{"text": "fact"}],
+                "location": {"searchResultLocation": {"searchResultIndex": 0, "start": 0, "end": 1}},
+            }}}},
+            {"contentBlockStop": {"contentBlockIndex": 0}},
+            {"messageStop": {"stopReason": "end_turn"}},
+            {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}},
+        ]
+        model = _make_model(input_cost_per_1k=0, output_cost_per_1k=0, cache_read_cost_per_1k=0,
+                            cache_write_cost_per_1k=0)
+        state = BedrockState(model, uuid.uuid4())
+        with patch("ttllm.core.providers.bedrock.converse.get_boto3_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.converse_stream.return_value = _make_stream_response(events)
+            mock_get_client.return_value = mock_client
+            collected = [c async for c in stream_converse_chunks(_make_request(), model, uuid.uuid4(), state=state)]
+
+        cit_chunks = [c for c in collected if c.kind == ChunkKind.CITATION_DELTA]
+        assert len(cit_chunks) == 1
+        assert cit_chunks[0].citation.kind == "search_result"
+        assert cit_chunks[0].citation.source == "https://kb/1"
+        text = state.get_response().content[0]
+        assert text.text == "Blue." and text.citations[0].cited_text == "fact"

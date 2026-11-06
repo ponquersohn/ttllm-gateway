@@ -13,18 +13,51 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 class TextBlock(BaseModel):
     type: Literal["text"] = "text"
     text: str
+    # Accepted on input (replayed assistant turns) and emitted on output when the model
+    # cites a document/search result. Entries are Anthropic citation-location dicts.
+    citations: list[dict[str, Any]] | None = None
     cache_control: dict[str, Any] | None = None
 
 
 class ImageSource(BaseModel):
+    """Base64 source (images and binary documents)."""
+
     type: Literal["base64"] = "base64"
     media_type: str
     data: str
 
 
+class UrlSource(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["url"] = "url"
+    url: str
+
+
+class FileSource(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["file"] = "file"
+    file_id: str
+
+
+def _get_source_type(v: Any) -> str:
+    if isinstance(v, dict):
+        return v.get("type", "base64")
+    return getattr(v, "type", "base64")
+
+
+AnyImageSource = Annotated[
+    Annotated[ImageSource, Tag("base64")]
+    | Annotated[UrlSource, Tag("url")]
+    | Annotated[FileSource, Tag("file")],
+    Discriminator(_get_source_type),
+]
+
+
 class ImageBlock(BaseModel):
     type: Literal["image"] = "image"
-    source: ImageSource
+    source: AnyImageSource
     cache_control: dict[str, Any] | None = None
 
 
@@ -34,10 +67,42 @@ class DocumentSource(BaseModel):
     data: str
 
 
+class PlainTextSource(BaseModel):
+    type: Literal["text"] = "text"
+    media_type: str = "text/plain"
+    data: str
+
+
+class ContentSource(BaseModel):
+    type: Literal["content"] = "content"
+    content: str | list[TextBlock | ImageBlock]
+
+
+AnyDocumentSource = Annotated[
+    Annotated[DocumentSource, Tag("base64")]
+    | Annotated[PlainTextSource, Tag("text")]
+    | Annotated[ContentSource, Tag("content")]
+    | Annotated[UrlSource, Tag("url")]
+    | Annotated[FileSource, Tag("file")],
+    Discriminator(_get_source_type),
+]
+
+
 class DocumentBlock(BaseModel):
     type: Literal["document"] = "document"
-    source: DocumentSource
+    source: AnyDocumentSource
     title: str | None = None
+    context: str | None = None
+    citations: dict[str, Any] | None = None
+    cache_control: dict[str, Any] | None = None
+
+
+class SearchResultBlock(BaseModel):
+    type: Literal["search_result"] = "search_result"
+    source: str
+    title: str
+    content: list[TextBlock]
+    citations: dict[str, Any] | None = None
     cache_control: dict[str, Any] | None = None
 
 
@@ -50,7 +115,10 @@ class ToolUseBlock(BaseModel):
 
 
 class ServerToolUseBlock(BaseModel):
-    type: Literal["server_tool_use"] = "server_tool_use"
+    # ``mcp_tool_use`` (MCP connector) has the same shape plus ``server_name``.
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["server_tool_use", "mcp_tool_use"] = "server_tool_use"
     id: str
     name: str
     input: dict[str, Any]
@@ -62,10 +130,30 @@ class WebSearchToolResultBlock(BaseModel):
     content: list[Any] = []
 
 
+# Server-tool result block types other than web_search. Their payloads are each
+# server tool's own contract, so they're kept opaque (``extra="allow"``).
+SERVER_TOOL_RESULT_TYPES = frozenset({
+    "web_fetch_tool_result",
+    "code_execution_tool_result",
+    "bash_code_execution_tool_result",
+    "text_editor_code_execution_tool_result",
+    "tool_search_tool_result",
+    "mcp_tool_result",
+})
+
+
+class ServerToolResultBlock(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    tool_use_id: str
+    content: Any = None
+
+
 class ToolResultBlock(BaseModel):
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
-    content: str | list[TextBlock | ImageBlock] = ""
+    content: str | list[ToolResultContentBlock] = ""
     is_error: bool = False
     cache_control: dict[str, Any] | None = None
 
@@ -81,24 +169,66 @@ class RedactedThinkingBlock(BaseModel):
     data: str
 
 
+class UnknownBlock(BaseModel):
+    """Any content block type this gateway doesn't model. Parsing it (instead of
+    failing validation with a 422) lets the input adapter reject it with a readable
+    400 naming the type."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+
+
+_KNOWN_CONTENT_TYPES = frozenset({
+    "text", "image", "document", "search_result", "tool_use", "server_tool_use",
+    "web_search_tool_result", "tool_result", "thinking", "redacted_thinking",
+})
+
+
 def _get_content_type(v: Any) -> str:
     if isinstance(v, dict):
-        return v.get("type", "text")
-    if hasattr(v, "type"):
-        return v.type
-    return "text"
+        t = v.get("type", "text")
+    else:
+        t = getattr(v, "type", "text")
+    if t in _KNOWN_CONTENT_TYPES:
+        return t
+    if t == "mcp_tool_use":
+        return "server_tool_use"
+    if t in SERVER_TOOL_RESULT_TYPES:
+        return "server_tool_result"
+    return "unknown"
+
+
+def _get_tool_result_content_type(v: Any) -> str:
+    t = _get_content_type(v)
+    return t if t in ("text", "image", "document", "search_result") else "unknown"
+
+
+ToolResultContentBlock = Annotated[
+    Annotated[TextBlock, Tag("text")]
+    | Annotated[ImageBlock, Tag("image")]
+    | Annotated[DocumentBlock, Tag("document")]
+    | Annotated[SearchResultBlock, Tag("search_result")]
+    | Annotated[UnknownBlock, Tag("unknown")],
+    Discriminator(_get_tool_result_content_type),
+]
+
+ToolResultBlock.model_rebuild()
 
 
 ContentBlock = Annotated[
     Annotated[TextBlock, Tag("text")]
     | Annotated[ImageBlock, Tag("image")]
     | Annotated[DocumentBlock, Tag("document")]
+    | Annotated[SearchResultBlock, Tag("search_result")]
     | Annotated[ToolUseBlock, Tag("tool_use")]
     | Annotated[ServerToolUseBlock, Tag("server_tool_use")]
     | Annotated[WebSearchToolResultBlock, Tag("web_search_tool_result")]
+    | Annotated[ServerToolResultBlock, Tag("server_tool_result")]
     | Annotated[ToolResultBlock, Tag("tool_result")]
     | Annotated[ThinkingBlock, Tag("thinking")]
-    | Annotated[RedactedThinkingBlock, Tag("redacted_thinking")],
+    | Annotated[RedactedThinkingBlock, Tag("redacted_thinking")]
+    | Annotated[UnknownBlock, Tag("unknown")],
     Discriminator(_get_content_type),
 ]
 
@@ -107,6 +237,10 @@ ContentBlock = Annotated[
 
 
 class ToolInputSchema(BaseModel):
+    # Keep the whole JSON Schema ($defs, additionalProperties, anyOf, description, ...),
+    # not just properties/required -- MCP tools in particular rely on the rest.
+    model_config = ConfigDict(extra="allow")
+
     type: Literal["object"] = "object"
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -162,6 +296,11 @@ class Message(BaseModel):
 
 class MessagesRequest(BaseModel):
     """Anthropic Messages API request format."""
+
+    # Unknown top-level params (container, mcp_servers, context_management, ...) are
+    # kept in ``model_extra`` so the adapter can log what it isn't forwarding, rather
+    # than having them vanish without a trace.
+    model_config = ConfigDict(extra="allow")
 
     model: str
     messages: list[Message]

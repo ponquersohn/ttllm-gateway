@@ -26,9 +26,32 @@ from pydantic import BaseModel, Discriminator, Tag
 # --- Content parts ---
 
 
+class Citation(BaseModel):
+    """One citation attached to generated text, pointing back into a document or
+    search result the caller supplied (or a web page, for server-side search).
+
+    ``kind`` selects which location fields are meaningful: ``char``/``page``/``chunk``
+    use ``document_index`` + ``start``/``end`` (end exclusive, as on the Anthropic wire);
+    ``search_result`` uses ``search_result_index`` + ``start``/``end`` (block indices);
+    ``web`` uses ``url``.
+    """
+
+    kind: Literal["char", "page", "chunk", "search_result", "web"]
+    cited_text: str = ""
+    document_index: int | None = None
+    document_title: str | None = None
+    search_result_index: int | None = None
+    start: int | None = None
+    end: int | None = None
+    source: str | None = None
+    title: str | None = None
+    url: str | None = None
+
+
 class TextPart(BaseModel):
     type: Literal["text"] = "text"
     text: str
+    citations: list[Citation] | None = None
     cache_control: bool = False
 
 
@@ -40,10 +63,28 @@ class ImagePart(BaseModel):
 
 
 class DocumentPart(BaseModel):
+    """A document. ``source_kind`` says where its content lives: ``base64`` -> ``data``
+    (binary, typed by ``media_type``), ``text`` -> ``text`` (plain text), ``content``
+    -> ``content`` (pre-chunked text blocks, each a citable unit)."""
+
     type: Literal["document"] = "document"
-    media_type: str
-    data: str
+    source_kind: Literal["base64", "text", "content"] = "base64"
+    media_type: str = "application/pdf"
+    data: str = ""
+    text: str | None = None
+    content: list[TextPart | ImagePart] | None = None
     title: str | None = None
+    context: str | None = None
+    citations: bool = False
+    cache_control: bool = False
+
+
+class SearchResultPart(BaseModel):
+    type: Literal["search_result"] = "search_result"
+    source: str
+    title: str
+    content: list[TextPart]
+    citations: bool = False
     cache_control: bool = False
 
 
@@ -58,7 +99,7 @@ class ToolCallPart(BaseModel):
 class ToolResultPart(BaseModel):
     type: Literal["tool_result"] = "tool_result"
     tool_call_id: str
-    content: list[TextPart | ImagePart]
+    content: list[TextPart | ImagePart | DocumentPart | SearchResultPart]
     is_error: bool = False
     cache_control: bool = False
 
@@ -83,6 +124,10 @@ class ServerToolCallPart(BaseModel):
     here rather than being excluded from the model entirely."""
 
     type: Literal["server_tool_call"] = "server_tool_call"
+    # Wire block type it came from (``server_tool_use``, ``mcp_tool_use``, ...) plus any
+    # extra fields (e.g. ``server_name``), so it can round-trip faithfully.
+    call_type: str = "server_tool_use"
+    extra: dict[str, Any] = {}
     id: str
     name: str
     input: dict[str, Any]
@@ -91,8 +136,12 @@ class ServerToolCallPart(BaseModel):
 
 class ServerToolResultPart(BaseModel):
     type: Literal["server_tool_result"] = "server_tool_result"
+    # Wire block type (``web_search_tool_result``, ``web_fetch_tool_result``, ...); each
+    # server tool's result payload is its own contract, so ``content`` stays opaque.
+    result_type: str = "web_search_tool_result"
+    extra: dict[str, Any] = {}
     tool_call_id: str
-    content: list[Any] = []
+    content: Any = []
     cache_control: bool = False
 
 
@@ -106,6 +155,7 @@ Part = Annotated[
     Annotated[TextPart, Tag("text")]
     | Annotated[ImagePart, Tag("image")]
     | Annotated[DocumentPart, Tag("document")]
+    | Annotated[SearchResultPart, Tag("search_result")]
     | Annotated[ToolCallPart, Tag("tool_call")]
     | Annotated[ToolResultPart, Tag("tool_result")]
     | Annotated[ThinkingPart, Tag("thinking")]
@@ -212,6 +262,7 @@ class ChunkKind(str, Enum):
     TOOL_ARGS_DELTA = "tool_args_delta"
     THINKING_DELTA = "thinking_delta"
     SIGNATURE_DELTA = "signature_delta"
+    CITATION_DELTA = "citation_delta"
     BLOCK_STOP = "block_stop"
     MESSAGE_STOP = "message_stop"
     ERROR = "error"
@@ -224,6 +275,7 @@ class InternalChunk(BaseModel):
     text: str | None = None
     partial_json: str | None = None
     signature: str | None = None
+    citation: Citation | None = None
     stop_reason: str | None = None
     usage: InternalUsage | None = None
     # MESSAGE_STOP only; see ``InternalResult.safeguard_results``.

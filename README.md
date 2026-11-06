@@ -645,5 +645,11 @@ docker compose -f docker-compose.integration.yml down -v
 
 The fake Bedrock is reached by the gateway at its compose-internal URL
 (`http://fake-bedrock:9099`), configured per-model via `config_json.endpoint_url` (see below).
+The fake echoes the last user message back, but validates every request the way real Bedrock
+does (`tests/integration/fake_bedrock/validation.py`): against botocore's `bedrock-runtime`
+service model, plus semantic rules observed on real Bedrock (document names, text document
+sources needing citations, `toolUse`/`toolResult` pairing, ...). A request real Bedrock would
+reject gets the same 400 `ValidationException`. Those rules are also unit-tested offline in
+`tests/test_fake_bedrock_validation.py`, which checks that requests the gateway builds pass them.
 If host port 8000 is busy, set `TTLLM_HOST_PORT` and point the tests at it with
 `TTLLM_TEST_BASE_URL`. These tests also run automatically in CI (`.github/workflows/integration.yml`).

@@ -140,3 +140,23 @@ class TestSafeguardResults:
         ])
         delta = _parse_sse(next(e for e in collected if e.startswith("event: message_delta")))[1]["delta"]
         assert "safeguard_results" not in delta
+
+
+class TestCitationsDelta:
+    @pytest.mark.asyncio
+    async def test_citation_delta_frame(self):
+        from ttllm.core.model import Citation
+
+        collected = await _collect([
+            InternalChunk(kind=ChunkKind.BLOCK_START, index=0, part=TextPart(text="")),
+            InternalChunk(kind=ChunkKind.TEXT_DELTA, index=0, text="Blue."),
+            InternalChunk(kind=ChunkKind.CITATION_DELTA, index=0, citation=Citation(
+                kind="page", cited_text="sky", document_index=0, document_title="D", start=1, end=2)),
+            InternalChunk(kind=ChunkKind.BLOCK_STOP, index=0),
+            InternalChunk(kind=ChunkKind.MESSAGE_STOP, stop_reason="end_turn",
+                          usage=InternalUsage(input_tokens=1, output_tokens=1)),
+        ])
+        deltas = [_parse_sse(e)[1]["delta"] for e in collected if e.startswith("event: content_block_delta")]
+        assert deltas[1] == {"type": "citations_delta", "citation": {
+            "type": "page_location", "cited_text": "sky", "document_index": 0, "document_title": "D",
+            "start_page_number": 1, "end_page_number": 2}}

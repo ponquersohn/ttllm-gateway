@@ -7,9 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ttllm.core.adapters.anthropic import request_to_internal, result_to_response
+from ttllm.core.adapters.anthropic import _part_to_block, request_to_internal, result_to_response
 from ttllm.core.errors import UnsupportedContentError
-from ttllm.core.model import InternalResult, InternalUsage, TextPart, ThinkingPart, ToolCallPart
+from ttllm.core.model import Citation, InternalResult, InternalUsage, TextPart, ThinkingPart, ToolCallPart
 from ttllm.schemas.anthropic import (
     DocumentBlock,
     DocumentSource,
@@ -242,6 +242,30 @@ class TestRequestToInternal:
         assert result_part.content[0].type == "text"
         assert result_part.content[1].type == "image"
 
+    def test_tool_result_document_content_preserved(self):
+        # Claude Code's Read tool returns PDFs as a document block inside tool_result.
+        request = MessagesRequest.model_validate({
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu_1",
+                    "content": [
+                        {"type": "text", "text": "PDF file read"},
+                        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                        "data": "aWdub3Jl"}},
+                    ],
+                }],
+            }],
+        })
+        internal = request_to_internal(request, _make_model())
+        result_part = internal.messages[0].content[0]
+        assert [p.type for p in result_part.content] == ["text", "document"]
+        assert result_part.content[1].media_type == "application/pdf"
+        assert result_part.content[1].data == "aWdub3Jl"
+
     def test_document_block_conversion(self):
         request = _make_request(
             messages=[
@@ -405,3 +429,99 @@ class TestSafeguards:
             safeguard_results=results,
         )
         assert result_to_response(result, "claude-sonnet", uuid.uuid4()).safeguard_results == results
+
+
+def _req(content, **extra) -> MessagesRequest:
+    return MessagesRequest.model_validate(
+        {"model": "m", "max_tokens": 10, "messages": [{"role": "user", "content": content}], **extra}
+    )
+
+
+def _first_part(content, **extra):
+    return request_to_internal(_req(content, **extra), _make_model()).messages[0].content[0]
+
+
+class TestCompatibility:
+    """Valid Anthropic input must never fail schema validation (a 422 kills the client's
+    conversation); anything the gateway can't handle becomes a readable 400 instead."""
+
+    def test_plain_text_document_source(self):
+        part = _first_part([{"type": "document", "title": "Notes", "context": "meeting notes",
+                             "citations": {"enabled": True},
+                             "source": {"type": "text", "media_type": "text/plain", "data": "hello"}}])
+        assert (part.source_kind, part.text, part.context, part.citations) == ("text", "hello", "meeting notes", True)
+
+    def test_content_document_source(self):
+        part = _first_part([{"type": "document", "source": {"type": "content", "content": [
+            {"type": "text", "text": "chunk 1"}, {"type": "text", "text": "chunk 2"}]}}])
+        assert part.source_kind == "content"
+        assert [p.text for p in part.content] == ["chunk 1", "chunk 2"]
+
+    @pytest.mark.parametrize("block", [
+        {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}},
+        {"type": "image", "source": {"type": "file", "file_id": "file_1"}},
+        {"type": "document", "source": {"type": "url", "url": "https://example.com/a.pdf"}},
+        {"type": "document", "source": {"type": "file", "file_id": "file_1"}},
+    ])
+    def test_url_and_file_sources_are_400_not_422(self, block):
+        with pytest.raises(UnsupportedContentError, match="inline as base64"):
+            _first_part([block])
+
+    def test_unknown_block_is_400_not_422(self):
+        with pytest.raises(UnsupportedContentError, match="'container_upload'"):
+            _first_part([{"type": "container_upload", "file_id": "f"}])
+
+    def test_unknown_block_inside_tool_result_is_400(self):
+        with pytest.raises(UnsupportedContentError, match="'brand_new'"):
+            _first_part([{"type": "tool_result", "tool_use_id": "t", "content": [{"type": "brand_new"}]}])
+
+    def test_search_result_top_level_and_in_tool_result(self):
+        sr = {"type": "search_result", "source": "https://kb/1", "title": "KB 1",
+              "content": [{"type": "text", "text": "fact"}], "citations": {"enabled": True}}
+        top = _first_part([sr])
+        assert (top.type, top.source, top.title, top.citations) == ("search_result", "https://kb/1", "KB 1", True)
+        nested = _first_part([{"type": "tool_result", "tool_use_id": "t", "content": [sr]}])
+        assert nested.content[0].type == "search_result"
+
+    def test_generic_server_tool_blocks_round_trip(self):
+        call = _first_part([{"type": "mcp_tool_use", "id": "m1", "name": "x", "server_name": "srv", "input": {}}])
+        assert (call.call_type, call.extra) == ("mcp_tool_use", {"server_name": "srv"})
+        result = _first_part([{"type": "web_fetch_tool_result", "tool_use_id": "s1",
+                               "content": {"type": "web_fetch_result", "url": "u"}}])
+        assert result.result_type == "web_fetch_tool_result"
+        block = _part_to_block(result).model_dump()
+        assert block["type"] == "web_fetch_tool_result"
+        assert block["content"] == {"type": "web_fetch_result", "url": "u"}
+
+    def test_tool_schema_kept_whole(self):
+        schema = {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}},
+                  "$defs": {"A": {"type": "string"}}, "additionalProperties": False}
+        internal = request_to_internal(_req("hi", tools=[{"name": "t", "input_schema": schema}]), _make_model())
+        dumped = internal.tools[0].input_schema
+        assert dumped["$defs"] == {"A": {"type": "string"}}
+        assert dumped["additionalProperties"] is False
+
+    def test_unknown_top_level_params_logged_not_rejected(self, caplog):
+        with caplog.at_level("WARNING"):
+            request_to_internal(_req("hi", container="c1", context_management={}), _make_model())
+        assert "container" in caplog.text and "context_management" in caplog.text
+
+    def test_citations_emitted_on_output(self):
+        part = TextPart(text="x", citations=[
+            Citation(kind="char", cited_text="q", document_index=0, document_title="D", start=1, end=4),
+            Citation(kind="search_result", cited_text="f", search_result_index=2, source="s", title="T", start=0, end=1),
+        ])
+        block = _part_to_block(part).model_dump()
+        assert block["citations"] == [
+            {"type": "char_location", "cited_text": "q", "document_index": 0, "document_title": "D",
+             "start_char_index": 1, "end_char_index": 4},
+            {"type": "search_result_location", "cited_text": "f", "search_result_index": 2, "source": "s",
+             "title": "T", "start_block_index": 0, "end_block_index": 1},
+        ]
+
+    def test_input_citations_parsed(self):
+        msg = {"type": "text", "text": "x", "citations": [
+            {"type": "page_location", "cited_text": "q", "document_index": 1, "document_title": None,
+             "start_page_number": 2, "end_page_number": 3}]}
+        part = _first_part([msg])
+        assert part.citations[0].kind == "page" and (part.citations[0].start, part.citations[0].end) == (2, 3)

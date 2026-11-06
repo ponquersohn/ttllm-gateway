@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -20,9 +21,10 @@ import boto3
 from botocore.config import Config as BotocoreConfig
 
 from ttllm.config import settings
-from ttllm.core.errors import ServerToolError
+from ttllm.core.errors import ServerToolError, UnsupportedContentError
 from ttllm.core.model import (
     ChunkKind,
+    Citation,
     DocumentPart,
     ImagePart,
     InternalChunk,
@@ -32,6 +34,7 @@ from ttllm.core.model import (
     InternalUsage,
     Part,
     RedactedThinkingPart,
+    SearchResultPart,
     ServerToolCallPart,
     ServerToolResultPart,
     TextPart,
@@ -115,12 +118,108 @@ def get_boto3_client(llm_model: Any) -> Any:
     return client
 
 
+# Converse ``ImageFormat`` / ``DocumentFormat`` enums (see botocore's bedrock-runtime model).
+_IMAGE_FORMATS = {"png", "jpeg", "gif", "webp"}
+_DOCUMENT_FORMATS = {
+    "application/pdf": "pdf",
+    "text/plain": "txt",
+    "text/markdown": "md",
+    "text/x-markdown": "md",
+    "text/csv": "csv",
+    "text/html": "html",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+}
+_DOC_NAME_MAX = 200
+_DOC_NAME_INVALID = re.compile(r"[^A-Za-z0-9\s\-()\[\]]+")
+
+
+class _DocumentNames:
+    """Per-request allocator for Converse document names. Converse only allows
+    alphanumerics, single spaces, hyphens, parentheses and square brackets, and names must
+    be unique within a request -- several untitled documents (e.g. PDFs returned by
+    successive Read tool calls) would otherwise all be called "document"."""
+
+    def __init__(self) -> None:
+        self._used: set[str] = set()
+
+    def take(self, title: str | None) -> str:
+        base = " ".join(_DOC_NAME_INVALID.sub(" ", title or "").split())[:_DOC_NAME_MAX - 6] or "document"
+        name, n = base, 1
+        while name in self._used:
+            n += 1
+            name = f"{base} ({n})"
+        self._used.add(name)
+        return name
+
+
 def _image_part_to_bedrock(part: ImagePart) -> dict[str, Any]:
-    fmt = part.media_type.split("/")[1] if "/" in part.media_type else part.media_type
+    fmt = (part.media_type.split("/")[1] if "/" in part.media_type else part.media_type).lower()
+    if fmt == "jpg":
+        fmt = "jpeg"
+    if fmt not in _IMAGE_FORMATS:
+        raise UnsupportedContentError(
+            f"Image media type {part.media_type!r} is not supported by the Bedrock provider "
+            f"(supported: image/png, image/jpeg, image/gif, image/webp)."
+        )
     return {"image": {"format": fmt, "source": {"bytes": base64.b64decode(part.data)}}}
 
 
-def _tool_result_content_to_bedrock(content: list[TextPart | ImagePart]) -> list[dict[str, Any]]:
+def _document_part_to_bedrock(part: DocumentPart, names: _DocumentNames) -> dict[str, Any]:
+    # Converse only accepts ``source.text``/``source.content`` when citations are enabled
+    # (otherwise: "DocumentSource ... must set one of bytes, s3Location"), so without
+    # citations those sources are sent as plain-text bytes instead.
+    if part.source_kind in ("text", "content"):
+        fmt = "txt"
+        if part.source_kind == "text":
+            chunks = [part.text or ""]
+        else:
+            chunks = []
+            for p in part.content or []:
+                if not isinstance(p, TextPart):
+                    raise UnsupportedContentError(
+                        "Images inside a 'content' document source are not supported by the Bedrock "
+                        "provider; Converse document content is text-only."
+                    )
+                chunks.append(p.text)
+        if not part.citations:
+            source: dict[str, Any] = {"bytes": "\n\n".join(chunks).encode("utf-8")}
+        elif part.source_kind == "text":
+            source = {"text": chunks[0]}
+        else:
+            source = {"content": [{"text": c} for c in chunks]}
+    else:
+        fmt = _DOCUMENT_FORMATS.get((part.media_type or "").split(";")[0].strip().lower())
+        if fmt is None:
+            raise UnsupportedContentError(
+                f"Document media type {part.media_type!r} is not supported by the Bedrock provider "
+                f"(supported: {', '.join(sorted(_DOCUMENT_FORMATS))})."
+            )
+        source = {"bytes": base64.b64decode(part.data)}
+    doc: dict[str, Any] = {"format": fmt, "name": names.take(part.title), "source": source}
+    if part.context:
+        doc["context"] = part.context
+    if part.citations:
+        doc["citations"] = {"enabled": True}
+    return {"document": doc}
+
+
+def _search_result_part_to_bedrock(part: SearchResultPart) -> dict[str, Any]:
+    sr: dict[str, Any] = {
+        "source": part.source,
+        "title": part.title,
+        "content": [{"text": t.text} for t in part.content],
+    }
+    if part.citations:
+        sr["citations"] = {"enabled": True}
+    return {"searchResult": sr}
+
+
+def _tool_result_content_to_bedrock(
+    content: list[TextPart | ImagePart | DocumentPart | SearchResultPart], names: _DocumentNames
+) -> list[dict[str, Any]]:
     """Convert a ToolResultPart's content into a Bedrock toolResult content list."""
     parts: list[dict[str, Any]] = []
     for p in content:
@@ -128,32 +227,31 @@ def _tool_result_content_to_bedrock(content: list[TextPart | ImagePart]) -> list
             parts.append({"text": p.text})
         elif isinstance(p, ImagePart):
             parts.append(_image_part_to_bedrock(p))
+        elif isinstance(p, DocumentPart):
+            parts.append(_document_part_to_bedrock(p, names))
+        elif isinstance(p, SearchResultPart):
+            parts.append(_search_result_part_to_bedrock(p))
     return parts
 
 
-def _convert_part_to_bedrock(part: Part) -> dict[str, Any] | None:
+def _convert_part_to_bedrock(part: Part, names: _DocumentNames) -> dict[str, Any] | None:
     if isinstance(part, TextPart):
+        # Citations on a replayed assistant text block are output metadata; Converse
+        # takes the text alone.
         return {"text": part.text}
     if isinstance(part, ImagePart):
         return _image_part_to_bedrock(part)
     if isinstance(part, DocumentPart):
-        fmt = "pdf"
-        if part.media_type and "/" in part.media_type:
-            fmt = part.media_type.split("/")[1]
-        return {
-            "document": {
-                "format": fmt,
-                "name": part.title or "document",
-                "source": {"bytes": base64.b64decode(part.data)},
-            }
-        }
+        return _document_part_to_bedrock(part, names)
+    if isinstance(part, SearchResultPart):
+        return _search_result_part_to_bedrock(part)
     if isinstance(part, ToolCallPart):
         return {"toolUse": {"toolUseId": part.id, "name": part.name, "input": part.input}}
     if isinstance(part, ToolResultPart):
         return {
             "toolResult": {
                 "toolUseId": part.tool_call_id,
-                "content": _tool_result_content_to_bedrock(part.content),
+                "content": _tool_result_content_to_bedrock(part.content, names),
                 "status": "error" if part.is_error else "success",
             }
         }
@@ -171,10 +269,10 @@ def _convert_part_to_bedrock(part: Part) -> dict[str, Any] | None:
     return {"text": str(part)}
 
 
-def _convert_message_to_bedrock(msg: InternalMessage) -> dict[str, Any]:
+def _convert_message_to_bedrock(msg: InternalMessage, names: _DocumentNames) -> dict[str, Any]:
     content_parts: list[dict[str, Any]] = []
     for part in msg.content:
-        converted = _convert_part_to_bedrock(part)
+        converted = _convert_part_to_bedrock(part, names)
         if converted is not None:
             content_parts.append(converted)
             if part.cache_control:
@@ -186,13 +284,16 @@ def _convert_message_to_bedrock(msg: InternalMessage) -> dict[str, Any]:
 def _convert_tools_to_bedrock(tools: list[ToolSpec]) -> list[dict[str, Any]]:
     tool_specs = []
     for tool in tools:
-        spec: dict[str, Any] = {"toolSpec": {"name": tool.name, "description": tool.description}}
-        input_schema = {
-            "type": "object",
-            "properties": tool.input_schema.get("properties", {}),
-        }
-        if tool.input_schema.get("required"):
-            input_schema["required"] = tool.input_schema["required"]
+        spec: dict[str, Any] = {"toolSpec": {"name": tool.name}}
+        # Converse rejects an empty description (min length 1); it's optional, so omit it.
+        if tool.description:
+            spec["toolSpec"]["description"] = tool.description
+        # Pass the schema through whole ($defs, anyOf, additionalProperties, ...). Only
+        # normalize what Converse is picky about: a top-level type, and no empty
+        # ``required`` array.
+        input_schema = {"type": "object", **tool.input_schema}
+        if not input_schema.get("required"):
+            input_schema.pop("required", None)
         spec["toolSpec"]["inputSchema"] = {"json": input_schema}
         tool_specs.append(spec)
         if tool.cache_control:
@@ -263,7 +364,8 @@ def build_converse_request(
         )
 
     params: dict[str, Any] = {"modelId": llm_model.provider_model_id}
-    params["messages"] = [_convert_message_to_bedrock(msg) for msg in request.messages]
+    names = _DocumentNames()
+    params["messages"] = [_convert_message_to_bedrock(msg, names) for msg in request.messages]
 
     if request.system:
         system_blocks: list[dict[str, Any]] = []
@@ -338,7 +440,36 @@ def _map_stop_reason(bedrock_reason: str) -> str:
     return _BEDROCK_STOP_REASON_MAP.get(bedrock_reason, "end_turn")
 
 
+def _citation_from_bedrock(c: dict[str, Any]) -> Citation | None:
+    """Converse ``Citation`` (or streaming ``CitationsDelta``) -> internal ``Citation``.
+    Converse location ``end`` values are passed through as-is (same exclusive-end
+    convention Anthropic uses, since Converse forwards Claude's own citations)."""
+    cited_text = "".join(sc.get("text", "") for sc in c.get("sourceContent", []) or [])
+    loc = c.get("location", {}) or {}
+    common: dict[str, Any] = {"cited_text": cited_text, "title": c.get("title"), "source": c.get("source")}
+    for key, kind in (("documentChar", "char"), ("documentPage", "page"), ("documentChunk", "chunk")):
+        if key in loc:
+            l = loc[key]
+            return Citation(kind=kind, document_index=l.get("documentIndex"), document_title=c.get("title"),
+                            start=l.get("start"), end=l.get("end"), **common)
+    if "searchResultLocation" in loc:
+        l = loc["searchResultLocation"]
+        return Citation(kind="search_result", search_result_index=l.get("searchResultIndex"),
+                        start=l.get("start"), end=l.get("end"), **common)
+    if "web" in loc:
+        return Citation(kind="web", url=loc["web"].get("url"), **common)
+    return None
+
+
+def _citations_from_bedrock(raw: list[dict[str, Any]]) -> list[Citation]:
+    return [c for c in (_citation_from_bedrock(r) for r in raw) if c is not None]
+
+
 def _parse_bedrock_content_block(block: dict[str, Any]) -> Part:
+    if "citationsContent" in block:
+        cc = block["citationsContent"]
+        text = "".join(g.get("text", "") for g in cc.get("content", []) or [])
+        return TextPart(text=text, citations=_citations_from_bedrock(cc.get("citations", []) or []) or None)
     if "text" in block:
         return TextPart(text=block["text"])
     if "toolUse" in block:
@@ -365,7 +496,7 @@ def _assembled_to_parts(assembled: dict[int, dict[str, Any]]) -> list[Part]:
         b = assembled[idx]
         kind = b.get("type")
         if kind == "text":
-            parts.append(TextPart(text=b.get("text", "")))
+            parts.append(TextPart(text=b.get("text", ""), citations=b.get("citations") or None))
         elif kind == "tool_use":
             raw = b.get("input_json", "") or ""
             try:
@@ -549,6 +680,11 @@ async def stream_converse_chunks(
                 if "text" in delta:
                     assembled.setdefault(idx, {"type": "text", "text": ""})["text"] += delta["text"]
                     yield InternalChunk(kind=ChunkKind.TEXT_DELTA, index=idx, text=delta["text"])
+                elif "citation" in delta:
+                    citation = _citation_from_bedrock(delta["citation"])
+                    if citation is not None:
+                        assembled.setdefault(idx, {"type": "text", "text": ""}).setdefault("citations", []).append(citation)
+                        yield InternalChunk(kind=ChunkKind.CITATION_DELTA, index=idx, citation=citation)
                 elif "toolUse" in delta:
                     partial = delta["toolUse"].get("input", "")
                     assembled.setdefault(idx, {"type": "tool_use", "id": "", "name": "", "input_json": ""})["input_json"] += partial

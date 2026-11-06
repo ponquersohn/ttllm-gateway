@@ -4,8 +4,10 @@ Implements the two routes boto3 calls for the Converse API:
   POST /model/{modelId}/converse         -> JSON response
   POST /model/{modelId}/converse-stream  -> application/vnd.amazon.eventstream
 
-It is deliberately dumb: it echoes the last user message back so tests can assert on
-deterministic output, and derives token counts from text length. boto3 does not validate
+Responses are deliberately dumb: it echoes the last user message back so tests can assert
+on deterministic output, and derives token counts from text length. Requests, however,
+are validated the way real Bedrock validates them (``validation.py``): a request real
+Bedrock would reject gets the same 400 ``ValidationException`` here. boto3 does not validate
 response signatures, so no AWS credentials or signing are needed on this side.
 
 Run standalone:  uvicorn tests.integration.fake_bedrock.app:app --host 0.0.0.0 --port 9099
@@ -14,8 +16,10 @@ Run standalone:  uvicorn tests.integration.fake_bedrock.app:app --host 0.0.0.0 -
 from __future__ import annotations
 
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
 from .eventstream_encoder import encode_converse_stream
+from .validation import BedrockValidationError, validate_request
 
 app = FastAPI(title="fake-bedrock")
 
@@ -80,14 +84,28 @@ def _cache_counts(body: dict, in_tokens: int) -> tuple[int, int]:
     return 0, 0
 
 
+def _validation_error(exc: BedrockValidationError) -> JSONResponse:
+    # Same wire shape as real Bedrock: boto3's rest-json parser reads the code from
+    # this header and the message from the body, raising ClientError(ValidationException).
+    return JSONResponse(
+        status_code=400,
+        content={"message": str(exc)},
+        headers={"x-amzn-ErrorType": "ValidationException"},
+    )
+
+
 @app.get("/")
 async def health() -> dict:
     return {"status": "ok"}
 
 
-@app.post("/model/{model_id:path}/converse")
-async def converse(model_id: str, request: Request) -> dict:
+@app.post("/model/{model_id:path}/converse", response_model=None)
+async def converse(model_id: str, request: Request) -> dict | JSONResponse:
     body = await request.json()
+    try:
+        validate_request("Converse", model_id, body)
+    except BedrockValidationError as exc:
+        return _validation_error(exc)
     reply = _reply_text(body)
     in_tokens, out_tokens = _token_counts(body, reply)
     cache_read, cache_write = _cache_counts(body, in_tokens)
@@ -106,6 +124,10 @@ async def converse(model_id: str, request: Request) -> dict:
 @app.post("/model/{model_id:path}/converse-stream")
 async def converse_stream(model_id: str, request: Request) -> Response:
     body = await request.json()
+    try:
+        validate_request("ConverseStream", model_id, body)
+    except BedrockValidationError as exc:
+        return _validation_error(exc)
     reply = _reply_text(body)
     in_tokens, out_tokens = _token_counts(body, reply)
     payload = encode_converse_stream(
