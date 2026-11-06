@@ -96,6 +96,8 @@ def _print_usage_summary(
 
     console.print("[bold]Usage Summary[/bold]")
     console.print(f"  Total requests: {data['total_requests']}")
+    if data.get("quota_blocked_requests"):
+        console.print(f"  Blocked by quota: {data['quota_blocked_requests']}")
     console.print(f"  Total input tokens: {data['total_input_tokens']}")
     console.print(f"  Total output tokens: {data['total_output_tokens']}")
     console.print(f"  Avg latency: {data['avg_latency_ms']}ms")

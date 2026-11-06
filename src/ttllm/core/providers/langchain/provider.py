@@ -189,6 +189,10 @@ class LangChainState(ProviderState):
     def get_cost(self) -> Decimal:
         return sum(self._cost_components().values(), Decimal("0"))
 
+    def get_total_tokens(self) -> int:
+        # usage_metadata.input_tokens already includes cached tokens.
+        return self.input_tokens + self.output_tokens
+
     def get_metadata(self) -> dict[str, Any]:
         components = self._cost_components()
         return {

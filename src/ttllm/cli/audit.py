@@ -19,14 +19,28 @@ from ttllm.cli._common import (
 app = TtllmTyper(help="View audit logs")
 
 
+def _model_cell(log: dict) -> str:
+    """The serving model, plus the route that led to it when the request was rerouted."""
+    routing = (log.get("metadata_json") or {}).get("routing")
+    if not routing:
+        return log["model_name"]
+    hops = ", ".join(f"{h['by']} '{h['name']}'" for h in routing.get("hops", []))
+    return f"{log['model_name']}\n[dim]from {routing.get('requested_model')} via {hops}[/dim]"
+
+
 @app.callback(invoke_without_command=True)
 def audit_logs_list(
     user_id: Optional[str] = typer.Option(None, "--user", help="Filter by user ID"),
     model_id: Optional[str] = typer.Option(None, "--model", help="Filter by model ID"),
+    request_id: Optional[str] = typer.Option(
+        None, "--request-id", help="Find the entry for a request (the X-Request-Id the client got)"
+    ),
     limit: int = typer.Option(20, help="Number of entries"),
 ):
-    """View recent audit logs."""
+    """View recent audit logs. A rerouted request shows the model it was sent to and why."""
     params = {"limit": limit}
+    if request_id:
+        params["request_id"] = request_id
     if user_id:
         params["user_id"] = user_id
     if model_id:
@@ -41,7 +55,7 @@ def audit_logs_list(
 
     table = Table(title="Audit Logs")
     table.add_column("Time")
-    table.add_column("Request ID", style="dim")
+    table.add_column("Request ID", style="dim", no_wrap=True, min_width=36 if request_id else None)
     table.add_column("User")
     table.add_column("Model")
     table.add_column("Status")
@@ -54,9 +68,9 @@ def audit_logs_list(
         status_style = "green" if log["status_code"] == 200 else "red"
         table.add_row(
             log["created_at"][:19],
-            log["request_id"][:8] + "...",
+            log["request_id"] if request_id else log["request_id"][:8] + "...",
             log["user_email"],
-            log["model_name"],
+            _model_cell(log),
             f"[{status_style}]{log['status_code']}[/{status_style}]",
             str(log["input_tokens"]),
             str(log["output_tokens"]),

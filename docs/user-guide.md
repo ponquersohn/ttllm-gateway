@@ -354,6 +354,19 @@ ttllm me usage costs                  # Your cost breakdown by model
 ttllm me usage costs --json           # Machine-readable output
 ```
 
+### Quotas
+
+Your administrator may limit your requests, tokens, or spend. To see the limits that apply to you and how much is left:
+
+```bash
+ttllm me quotas
+ttllm me quotas --json
+```
+
+Or use `GET /me/quotas`. Rules that depend on what a request contains can't be evaluated without a request, so this list is best-effort for those.
+
+When you reach a limit, requests fail with a `429` and a `rate_limit_error`. The `Retry-After` header says how many seconds remain until the limit resets. Responses also carry `x-ttllm-quota-name`, `-limit`, `-remaining`, and `-reset` headers for whichever limit you're closest to.
+
 ### CLI (admin — requires usage.view permission)
 
 ```bash
@@ -371,7 +384,11 @@ ttllm usage costs --since 2026-04-01
 
 ```bash
 ttllm audit-logs --limit 20
+ttllm audit-logs --request-id <id>     # The X-Request-Id header a client got back
 ```
+
+Rerouted requests show the model the client asked for, and the rule or quota that moved them,
+under the model name.
 
 ## 10. Log Out
 

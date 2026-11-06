@@ -7,7 +7,6 @@ import logging
 import re
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -27,11 +26,13 @@ from ttllm.core.rules import (
     RuleOutcome,
     apply_action,
     evaluate,
-    iter_conditions,
+    references_groups,
 )
+from ttllm.models.quota import Quota
 from ttllm.models.rule import Rule
 from ttllm.schemas.anthropic import MessagesRequest
-from ttllm.services import usage_service
+from ttllm.schemas.rules import iter_condition_dicts, validate_rule_definition
+from ttllm.services import group_service
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,34 @@ def invalidate_rules_cache() -> None:
 
 # --- CRUD ---
 
+
+class RuleValidationError(ValueError):
+    """A rule's definition is invalid as a whole; surfaced to admins as a 422."""
+
+
+async def _validate_enabled_rule(db: AsyncSession, name: str, conditions: dict, action: dict) -> None:
+    """Checks needing both parts of a rule, or the database. Only enabled rules must pass,
+    so a disabled legacy rule can still be renamed or described, but not switched back on."""
+    try:
+        validate_rule_definition(conditions, action)
+    except ValueError as exc:
+        raise RuleValidationError(str(exc)) from exc
+
+    if action.get("type") != "apply_quota":
+        return
+    quota_ids = [uuid.UUID(str(q)) for q in action["quota_ids"]]
+    result = await db.execute(select(Quota.id).where(Quota.id.in_(quota_ids)))
+    missing = set(quota_ids) - set(result.scalars().all())
+    if missing:
+        raise RuleValidationError(f"Unknown quota ids: {sorted(str(m) for m in missing)}")
+    if any(c.get("type") in ("header", "content") for c in iter_condition_dicts(conditions)):
+        logger.warning(
+            "Rule '%s' attaches a quota using header/content conditions, "
+            "which clients control and can use to avoid the quota",
+            name,
+        )
+
+
 async def create_rule(
     db: AsyncSession,
     name: str,
@@ -102,6 +131,8 @@ async def create_rule(
     weight: int = 0,
     enabled: bool = True,
 ) -> Rule:
+    if enabled:
+        await _validate_enabled_rule(db, name, conditions, action)
     rule = Rule(
         name=name,
         description=description,
@@ -144,9 +175,16 @@ async def update_rule(
     if not rule:
         return None
     _MUTABLE_FIELDS = {"name", "description", "weight", "enabled", "conditions", "action"}
-    for key, value in kwargs.items():
-        if key in _MUTABLE_FIELDS and value is not None:
-            setattr(rule, key, value)
+    changes = {k: v for k, v in kwargs.items() if k in _MUTABLE_FIELDS and v is not None}
+    if changes.get("enabled", rule.enabled):
+        await _validate_enabled_rule(
+            db,
+            changes.get("name", rule.name),
+            changes.get("conditions", rule.conditions),
+            changes.get("action", rule.action),
+        )
+    for key, value in changes.items():
+        setattr(rule, key, value)
     await db.commit()
     await db.refresh(rule)
     invalidate_rules_cache()
@@ -191,8 +229,6 @@ def _convert_condition_group_dict(data: dict) -> ConditionGroup:
                 operator=MatchOp(item.get("operator", "exact")),
                 value=item["value"],
                 negate=item.get("negate", False),
-                window=item.get("window"),
-                per=tuple(item.get("per", [])),
             ))
     return ConditionGroup(logic=logic, conditions=tuple(conditions))
 
@@ -209,6 +245,8 @@ def _convert_action_dict(data: dict) -> Action:
         )
     if action_type == ActionType.REWRITE:
         return Action(type=action_type, pattern=data["pattern"], replacement=data["replacement"])
+    if action_type == ActionType.APPLY_QUOTA:
+        return Action(type=action_type, quota_ids=tuple(str(q) for q in data["quota_ids"]))
     return Action(type=action_type)
 
 
@@ -219,6 +257,11 @@ def build_request_context(
     headers: dict[str, str],
     user_id: str,
     metadata: dict[str, Any] | None = None,
+    *,
+    user_email: str = "",
+    token_id: str = "",
+    groups: tuple[str, ...] = (),
+    resolved_model: str | None = None,
 ) -> RequestContext:
     messages_text = _extract_messages_text(request)
     system_text = _extract_system_text(request)
@@ -235,7 +278,52 @@ def build_request_context(
         top_k=request.top_k,
         stream=request.stream,
         metadata=metadata or {},
+        user_email=user_email,
+        token_id=token_id,
+        groups=groups,
+        resolved_model=resolved_model,
     )
+
+
+def build_status_context(
+    model_name: str,
+    user_id: str,
+    user_email: str,
+    token_id: str,
+    groups: tuple[str, ...],
+) -> RequestContext:
+    """Context for working out which quotas apply outside a request, so with no content."""
+    return RequestContext(
+        model=model_name,
+        messages_text="",
+        system_text="",
+        headers={},
+        user_id=user_id,
+        max_tokens=0,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        stream=False,
+        user_email=user_email,
+        token_id=token_id,
+        groups=groups,
+        resolved_model=model_name,
+    )
+
+
+async def load_subject_groups(
+    db: AsyncSession,
+    rules: list[CoreRule],
+    user_id: uuid.UUID,
+) -> tuple[str, ...]:
+    """The caller's group names, loaded only when an active rule actually matches on groups.
+
+    Matchers are synchronous and pure, so this has to happen before evaluation.
+    """
+    if not references_groups(rules):
+        return ()
+    groups = await group_service.list_user_groups(db, user_id)
+    return tuple(g.name for g in groups)
 
 
 def evaluate_rules(rules: list[CoreRule], ctx: RequestContext) -> RuleOutcome | None:
@@ -244,76 +332,6 @@ def evaluate_rules(rules: list[CoreRule], ctx: RequestContext) -> RuleOutcome | 
         return None
     logger.info("Rule '%s' matched (weight=%d)", matched_rule.name, matched_rule.weight)
     return apply_action(matched_rule, ctx)
-
-
-async def populate_quota_metadata(
-    db: AsyncSession,
-    rules: list[CoreRule],
-    ctx: RequestContext,
-) -> None:
-    """Precompute moving-window quota aggregates and inject them into ``ctx.metadata``.
-
-    Keeps the pure core engine free of DB/clock access: the quota matcher and the
-    block-message renderer only read ``ctx.metadata["quota"][<measure>]``. Runs at
-    most one aggregate query per distinct ``(measure, window, per)`` across all
-    rules, and returns immediately (zero queries) when no quota condition exists.
-    """
-    # Collect distinct quota specs and remember each measure's threshold for the
-    # template namespace. A spec is keyed by (measure, window, per) so the same
-    # measure over different windows yields separate queries.
-    specs: dict[tuple, dict[str, Any]] = {}
-    for rule in rules:
-        for cond in iter_conditions(rule.conditions):
-            if cond.type != ConditionType.QUOTA or cond.window is None:
-                continue
-            per = _resolve_per(cond.per, ctx)
-            key = (cond.field, cond.window, tuple(sorted(per.items())))
-            specs.setdefault(key, {
-                "measure": cond.field,
-                "window": cond.window,
-                "per": per,
-                "threshold": cond.value,
-            })
-
-    if not specs:
-        return
-
-    now = datetime.now(timezone.utc)
-    quota_ns: dict[str, Any] = ctx.metadata.setdefault("quota", {})
-    for spec in specs.values():
-        agg = await usage_service.get_window_aggregate(
-            db,
-            uuid.UUID(ctx.user_id),
-            measure=spec["measure"],
-            window_seconds=spec["window"],
-            per=spec["per"] or None,
-            now=now,
-        )
-        quota_ns[spec["measure"]] = {
-            "value": agg["value"],
-            "threshold": spec["threshold"],
-            "window": spec["window"],
-            "next_free": _next_free(agg["oldest_ts"], spec["window"], now),
-            "per": spec["per"],
-        }
-
-
-def _resolve_per(per: tuple[str, ...], ctx: RequestContext) -> dict[str, Any]:
-    """Map a quota condition's ``per`` dimensions to concrete filter values."""
-    resolved: dict[str, Any] = {}
-    if "model" in per:
-        resolved["model"] = ctx.model
-    return resolved
-
-
-def _next_free(oldest_ts: datetime | None, window: int, now: datetime) -> int:
-    """Seconds until the oldest contributing row ages out of the window."""
-    if oldest_ts is None:
-        return 0
-    if oldest_ts.tzinfo is None:
-        oldest_ts = oldest_ts.replace(tzinfo=timezone.utc)
-    seconds = (oldest_ts + timedelta(seconds=window) - now).total_seconds()
-    return max(0, int(seconds))
 
 
 def apply_rewrite_to_request(

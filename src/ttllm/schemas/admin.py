@@ -6,9 +6,12 @@ import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, PlainSerializer, field_validator, model_validator
+
+from ttllm.core.quota import format_amount
 
 _SENSITIVE_KEY_PATTERN = re.compile(r"(secret|key|password|token|credential)", re.IGNORECASE)
 _REDACTED = "***REDACTED***"
@@ -197,6 +200,8 @@ class AuditLogBodyResponse(BaseModel):
 
 class UsageSummaryResponse(BaseModel):
     total_requests: int
+    # Requests denied by a quota; not included in any other figure.
+    quota_blocked_requests: int = 0
     total_input_tokens: int
     total_output_tokens: int
     avg_latency_ms: float
@@ -284,6 +289,128 @@ class RuleResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# --- Quotas ---
+
+
+class QuotaOnExceeded(BaseModel):
+    action: Literal["block", "reroute"] = "block"
+    status_code: int | None = None
+    message: str | None = None
+    target: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_action(self) -> "QuotaOnExceeded":
+        if self.status_code is not None and not 400 <= self.status_code <= 599:
+            raise ValueError("on_exceeded.status_code must be an HTTP error status (400-599)")
+        if self.action == "reroute" and not self.target:
+            raise ValueError("on_exceeded.target is required when action is 'reroute'")
+        return self
+
+
+class QuotaDefinition(BaseModel):
+    """The complete, valid definition of a quota. PATCH validates the merged result."""
+
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=1024)
+    measure: Literal["requests", "tokens", "cost"]
+    limit_value: Decimal = Field(gt=0, max_digits=38, decimal_places=18)
+    dimensions: list[Literal["user", "model", "token"]] = ["user"]
+    window_type: Literal["calendar", "session"]
+    window_unit: Literal["hour", "day", "week", "month"] | None = None
+    window_duration_seconds: int | None = Field(default=None, gt=0)
+    timezone: str = "UTC"
+    enforcement: Literal["soft", "strict"] = "soft"
+    on_exceeded: QuotaOnExceeded = QuotaOnExceeded()
+    enabled: bool = True
+
+    @field_validator("dimensions")
+    @classmethod
+    def _unique_dimensions(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("dimensions must not repeat")
+        return v
+
+    @field_validator("timezone")
+    @classmethod
+    def _valid_timezone(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown timezone: {v}") from exc
+        return v
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> "QuotaDefinition":
+        if self.window_type == "calendar":
+            if self.window_unit is None or self.window_duration_seconds is not None:
+                raise ValueError("calendar windows require window_unit and no window_duration_seconds")
+        else:
+            if self.window_duration_seconds is None or self.window_unit is not None:
+                raise ValueError("session windows require window_duration_seconds and no window_unit")
+        return self
+
+
+class QuotaUpdate(BaseModel):
+    """Only fields that were sent are applied, so an optional field can be cleared with null."""
+
+    name: str | None = None
+    description: str | None = None
+    measure: str | None = None
+    limit_value: Decimal | None = None
+    dimensions: list[str] | None = None
+    window_type: str | None = None
+    window_unit: str | None = None
+    window_duration_seconds: int | None = None
+    timezone: str | None = None
+    enforcement: str | None = None
+    on_exceeded: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
+def _plain_amount(value: Decimal) -> str:
+    return format_amount(value)
+
+
+Amount = Annotated[Decimal, PlainSerializer(_plain_amount, return_type=str)]
+
+
+class QuotaResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str | None
+    measure: str
+    limit_value: Amount
+    dimensions: list[str]
+    window_type: str
+    window_unit: str | None
+    window_duration_seconds: int | None
+    timezone: str
+    enforcement: str
+    on_exceeded: dict[str, Any]
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class QuotaBucketResponse(BaseModel):
+    quota_id: uuid.UUID
+    quota_name: str
+    measure: str
+    limit: Amount
+    used: Amount
+    in_flight: Amount
+    remaining: Amount
+    window_start: datetime | None
+    window_end: datetime | None
+    dimension_values: dict[str, Any]
+
+
+class QuotaResetResponse(BaseModel):
+    buckets_reset: int
 
 
 # --- Secrets ---

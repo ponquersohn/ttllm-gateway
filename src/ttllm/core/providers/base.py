@@ -46,6 +46,14 @@ class ProviderState(ABC):
         """Total cost for this exchange, computed from this state's own fields."""
 
     @abstractmethod
+    def get_total_tokens(self) -> int:
+        """Total tokens this exchange consumed, for quota accounting.
+
+        Each provider owns this because the meaning differs: some report cached tokens
+        separately from input, others include them in input.
+        """
+
+    @abstractmethod
     def get_metadata(self) -> dict[str, Any]:
         """Opaque provider blob persisted to ``audit_logs.provider_metadata``.
 

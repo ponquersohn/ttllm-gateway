@@ -34,6 +34,7 @@ async def log_request(
     request_body: dict | None = None,
     response_body: dict | None = None,
     log_bodies: bool | None = None,
+    commit: bool = True,
 ) -> AuditLog:
     """Write an audit log entry. Optionally includes request/response bodies.
 
@@ -42,6 +43,9 @@ async def log_request(
     stays a self-contained, accurate historical record even if the model or user is
     later renamed or deleted — ``model_id``/``user_id`` carry no FK and are kept only
     for convenience joins against currently-live rows.
+
+    ``commit=False`` leaves the transaction open, so the caller can write related rows
+    (quota settlement) atomically with the audit row.
     """
     audit = AuditLog(
         user_id=user_id,
@@ -73,8 +77,8 @@ async def log_request(
         )
         db.add(body)
 
-    await db.commit()
-    await db.refresh(audit)
+    if commit:
+        await db.commit()
     return audit
 
 
@@ -86,10 +90,15 @@ async def get_audit_logs(
     until: datetime | None = None,
     offset: int = 0,
     limit: int = 50,
+    request_id: uuid.UUID | None = None,
 ) -> tuple[list[AuditLog], int]:
     """Query audit logs with optional filters."""
     query = select(AuditLog)
     count_query = select(AuditLog.id)
+
+    if request_id:
+        query = query.where(AuditLog.request_id == request_id)
+        count_query = count_query.where(AuditLog.request_id == request_id)
 
     if user_id:
         query = query.where(AuditLog.user_id == user_id)

@@ -24,7 +24,7 @@ class ConditionType(str, Enum):
     PARAMETER = "parameter"
     CONTENT = "content"
     FUNCTION = "function"
-    QUOTA = "quota"
+    SUBJECT = "subject"
 
 
 class ActionType(str, Enum):
@@ -32,6 +32,7 @@ class ActionType(str, Enum):
     BLOCK = "block"
     ALLOW = "allow"
     REWRITE = "rewrite"
+    APPLY_QUOTA = "apply_quota"
 
 
 class LogicOp(str, Enum):
@@ -46,10 +47,6 @@ class Condition:
     operator: MatchOp
     value: Any
     negate: bool = False
-    # Quota conditions only: the moving-window size (seconds) and the dimensions
-    # the aggregate is scoped by (e.g. ("model",)). Ignored for other types.
-    window: int | None = None
-    per: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -65,6 +62,7 @@ class Action:
     pattern: str | None = None
     replacement: str | None = None
     status_code: int = 403
+    quota_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -90,6 +88,12 @@ class RequestContext:
     top_k: int | None
     stream: bool
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Trusted, server-derived identity for ``subject`` conditions.
+    user_email: str = ""
+    token_id: str = ""
+    groups: tuple[str, ...] = ()
+    # The model actually serving the request; set only when evaluating apply_quota rules.
+    resolved_model: str | None = None
 
 
 @dataclass
@@ -101,7 +105,6 @@ class RuleOutcome:
     block_message: str = ""
     rewrite_pattern: str | None = None
     rewrite_replacement: str | None = None
-    retry_after_seconds: int | None = None
 
 
 # --- Matcher registry ---
@@ -183,6 +186,7 @@ def _match_parameter(condition: Condition, ctx: RequestContext) -> bool:
         "top_p": ctx.top_p,
         "top_k": ctx.top_k,
         "stream": ctx.stream,
+        "resolved_model": ctx.resolved_model,
     }
     value = param_map.get(condition.field)
     if value is None and condition.field.startswith("metadata."):
@@ -209,17 +213,17 @@ def _match_function(condition: Condition, ctx: RequestContext) -> bool:
     return _compare(computed, condition.operator, condition.value)
 
 
-@register_matcher(ConditionType.QUOTA)
-def _match_quota(condition: Condition, ctx: RequestContext) -> bool:
-    # The service layer precomputes the moving-window aggregate into
-    # ``ctx.metadata["quota"][<measure>]``; this matcher only reads it (pure, no
-    # I/O). ``condition.field`` is the measure (cost/tokens/requests),
-    # ``condition.value`` the threshold. A missing namespace means the service
-    # found no data, which compares as 0 (never trips a ``gt`` threshold).
-    quota = ctx.metadata.get("quota", {})
-    bucket = quota.get(condition.field, {})
-    current = bucket.get("value", 0)
-    return _compare(current, condition.operator, condition.value)
+@register_matcher(ConditionType.SUBJECT)
+def _match_subject(condition: Condition, ctx: RequestContext) -> bool:
+    # Matches the authenticated caller, never anything the client sends in the request.
+    if condition.field == "group":
+        return any(_compare(group, condition.operator, condition.value) for group in ctx.groups)
+    subject_map = {
+        "user_id": ctx.user_id,
+        "user_email": ctx.user_email,
+        "token_id": ctx.token_id,
+    }
+    return _compare(subject_map.get(condition.field), condition.operator, condition.value)
 
 
 # --- Built-in functions ---
@@ -264,8 +268,10 @@ def evaluate_group(group: ConditionGroup, ctx: RequestContext) -> bool:
 
 
 def evaluate(rules: list[Rule], ctx: RequestContext) -> Rule | None:
+    """Return the highest-weight matching terminal rule. ``apply_quota`` rules never win:
+    they don't compete for the request, see ``collect_quota_ids``."""
     sorted_rules = sorted(
-        (r for r in rules if r.enabled),
+        (r for r in rules if r.enabled and r.action.type != ActionType.APPLY_QUOTA),
         key=lambda r: r.weight,
         reverse=True,
     )
@@ -273,6 +279,28 @@ def evaluate(rules: list[Rule], ctx: RequestContext) -> Rule | None:
         if evaluate_group(rule.conditions, ctx):
             return rule
     return None
+
+
+def collect_quota_ids(rules: list[Rule], ctx: RequestContext) -> list[str]:
+    """Union of the quotas attached by every matching ``apply_quota`` rule.
+
+    Unlike terminal rules these all apply, so no other rule, whatever its weight, can make
+    a request skip a quota.
+    """
+    quota_ids: dict[str, None] = {}
+    for rule in rules:
+        if rule.enabled and rule.action.type == ActionType.APPLY_QUOTA and evaluate_group(rule.conditions, ctx):
+            quota_ids.update(dict.fromkeys(rule.action.quota_ids))
+    return list(quota_ids)
+
+
+def references_groups(rules: list[Rule]) -> bool:
+    """Whether any rule has a ``subject.group`` condition, so groups must be loaded."""
+    return any(
+        cond.type == ConditionType.SUBJECT and cond.field == "group"
+        for rule in rules
+        for cond in iter_conditions(rule.conditions)
+    )
 
 
 def iter_conditions(group: ConditionGroup):
@@ -308,22 +336,6 @@ def render_template(text: str, namespace: dict[str, Any]) -> str:
     return _TEMPLATE_VAR.sub(_sub, text)
 
 
-def _retry_after_for_rule(rule: Rule, ctx: RequestContext) -> int | None:
-    """Largest ``next_free`` across the rule's quota conditions, or None.
-
-    You cannot retry until the most-constraining window has room, so we take the
-    max of the per-measure ``next_free`` values the service precomputed.
-    """
-    quota = ctx.metadata.get("quota", {})
-    waits = [
-        quota.get(cond.field, {}).get("next_free")
-        for cond in iter_conditions(rule.conditions)
-        if cond.type == ConditionType.QUOTA
-    ]
-    waits = [w for w in waits if isinstance(w, int)]
-    return max(waits) if waits else None
-
-
 def apply_action(rule: Rule, ctx: RequestContext) -> RuleOutcome:
     action = rule.action
 
@@ -346,7 +358,6 @@ def apply_action(rule: Rule, ctx: RequestContext) -> RuleOutcome:
             rule_name=rule.name,
             block_status=action.status_code,
             block_message=message,
-            retry_after_seconds=_retry_after_for_rule(rule, ctx),
         )
 
     if action.type == ActionType.REWRITE:

@@ -15,10 +15,15 @@ from ttllm.cli._common import (
     handle_response,
     json_mode,
     print_json,
+    resolve_quota,
     resolve_rule,
 )
 
 app = TtllmTyper(help="Manage rules")
+
+
+def _apply_quota_action(client, quota_names: list[str]) -> dict:
+    return {"type": "apply_quota", "quota_ids": [resolve_quota(client, name) for name in quota_names]}
 
 
 @app.command("list")
@@ -84,22 +89,26 @@ def rules_show(
 def rules_create(
     name: str = typer.Option(..., help="Rule name"),
     conditions: str = typer.Option(..., help="JSON conditions object"),
-    action: str = typer.Option(..., help="JSON action object"),
+    action: Optional[str] = typer.Option(None, help="JSON action object"),
+    apply_quota: Optional[list[str]] = typer.Option(None, "--apply-quota", help="Quota name to attach (repeatable), instead of --action"),
     weight: int = typer.Option(0, help="Rule weight (higher = evaluated first)"),
     description: Optional[str] = typer.Option(None, help="Rule description"),
     disabled: bool = typer.Option(False, "--disabled", help="Create rule as disabled"),
 ):
     """Create a new rule."""
+    if bool(action) == bool(apply_quota):
+        console.print("[red]Provide exactly one of --action or --apply-quota.[/red]")
+        raise typer.Exit(1)
     body: dict = {
         "name": name,
         "conditions": json.loads(conditions),
-        "action": json.loads(action),
         "weight": weight,
         "enabled": not disabled,
     }
     if description is not None:
         body["description"] = description
     with get_client() as client:
+        body["action"] = _apply_quota_action(client, apply_quota) if apply_quota else json.loads(action)
         data = handle_response(client.post("/admin/rules", json=body))
     if json_mode():
         print_json(data)
@@ -117,6 +126,7 @@ def rules_update(
     description: Optional[str] = typer.Option(None, "--description", help="New description"),
     conditions: Optional[str] = typer.Option(None, "--conditions", help="New JSON conditions"),
     action: Optional[str] = typer.Option(None, "--action", help="New JSON action"),
+    apply_quota: Optional[list[str]] = typer.Option(None, "--apply-quota", help="Quota name to attach (repeatable), instead of --action"),
     enabled: Optional[bool] = typer.Option(None, "--enabled", help="Enable/disable rule"),
     use_ids: bool = typer.Option(False, "--use-ids", help="Treat rule argument as UUID"),
 ):
@@ -134,10 +144,15 @@ def rules_update(
         body["action"] = json.loads(action)
     if enabled is not None:
         body["enabled"] = enabled
-    if not body:
+    if action is not None and apply_quota:
+        console.print("[red]Provide only one of --action or --apply-quota.[/red]")
+        raise typer.Exit(1)
+    if not body and not apply_quota:
         console.print("[red]Nothing to update. Provide at least one option.[/red]")
         raise typer.Exit(1)
     with get_client() as client:
+        if apply_quota:
+            body["action"] = _apply_quota_action(client, apply_quota)
         rule_id = rule if use_ids else resolve_rule(client, rule)
         data = handle_response(client.patch(f"/admin/rules/{rule_id}", json=body))
     if json_mode():
