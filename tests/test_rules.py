@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from decimal import Decimal
 
 import pytest
 
@@ -22,7 +21,8 @@ from ttllm.core.rules import (
     evaluate,
     evaluate_condition,
     evaluate_group,
-    iter_conditions,
+    collect_quota_ids,
+    references_groups,
     render_template,
 )
 from ttllm.schemas.anthropic import Message, MessagesRequest
@@ -34,17 +34,16 @@ from ttllm.schemas.rules import (
     RerouteActionSchema,
     RewriteActionSchema,
     RuleSchema,
+    validate_rule_definition,
 )
 from ttllm.services.rules_service import (
     _convert_action_dict,
     _convert_condition_group_dict,
     _db_rule_to_core,
-    _next_free,
     apply_rewrite_to_request,
     build_request_context,
     evaluate_rules,
     invalidate_rules_cache,
-    populate_quota_metadata,
 )
 
 
@@ -541,200 +540,140 @@ class TestRenderTemplate:
         assert render_template("{{ quota.cost }}", {"quota": {"cost": 9}}) == "9"
 
 
-# --- Quota condition matcher (pure) ---
+# --- apply_quota and subject conditions ---
 
 
-def _quota_ctx(measure="cost", value=10, **bucket):
-    md = {"quota": {measure: {"value": value, **bucket}}}
-    return _ctx(metadata=md)
-
-
-def _quota_cond(measure="cost", op=MatchOp.GT, threshold=5, window=60, per=()):
-    return Condition(
-        type=ConditionType.QUOTA, field=measure, operator=op, value=threshold,
-        window=window, per=tuple(per),
+def _apply_quota_rule(name="q", weight=1, conditions=(), quota_ids=("quota-a",), enabled=True):
+    return _rule(
+        name=name,
+        weight=weight,
+        conditions=ConditionGroup(logic=LogicOp.AND, conditions=tuple(conditions)),
+        action=Action(type=ActionType.APPLY_QUOTA, quota_ids=tuple(quota_ids)),
+        enabled=enabled,
     )
 
 
-class TestQuotaMatcher:
-    def test_gt_trips(self):
-        assert evaluate_condition(_quota_cond(threshold=5), _quota_ctx(value=10)) is True
-
-    def test_gt_below_threshold(self):
-        assert evaluate_condition(_quota_cond(threshold=20), _quota_ctx(value=10)) is False
-
-    def test_gte_boundary(self):
-        assert evaluate_condition(_quota_cond(op=MatchOp.GTE, threshold=10), _quota_ctx(value=10)) is True
-
-    def test_missing_namespace_is_zero(self):
-        # No quota metadata populated -> value 0 -> never trips a gt threshold.
-        assert evaluate_condition(_quota_cond(threshold=1), _ctx()) is False
+def _subject(field, value, operator=MatchOp.EXACT, negate=False):
+    return Condition(type=ConditionType.SUBJECT, field=field, operator=operator, value=value, negate=negate)
 
 
-# --- apply_action with quota context ---
+class TestApplyQuota:
+    def test_never_wins_terminal_evaluation(self):
+        assert evaluate([_apply_quota_rule(weight=1000)], _ctx()) is None
 
+    def test_all_matching_rules_apply(self):
+        rules = [_apply_quota_rule("a", quota_ids=("a",)), _apply_quota_rule("b", quota_ids=("b", "c"))]
+        assert collect_quota_ids(rules, _ctx()) == ["a", "b", "c"]
 
-class TestQuotaAction:
-    def test_block_status_and_message_render(self):
-        ctx = _quota_ctx(measure="cost", value=7.5, threshold=5.0, window=60, next_free=23)
-        action = _convert_action_dict({
-            "type": "block",
-            "status_code": 429,
-            "message": "Over {{quota.cost.value}} (limit {{quota.cost.threshold}}). Wait {{quota.cost.next_free}}s.",
-        })
-        rule = _rule(
-            conditions=ConditionGroup(logic=LogicOp.AND, conditions=(_quota_cond(),)),
-            action=action,
+    def test_shared_quota_is_listed_once(self):
+        rules = [_apply_quota_rule("a", quota_ids=("a",)), _apply_quota_rule("b", quota_ids=("a",))]
+        assert collect_quota_ids(rules, _ctx()) == ["a"]
+
+    def test_non_matching_and_disabled_rules_are_ignored(self):
+        rules = [
+            _apply_quota_rule("off", enabled=False, quota_ids=("off",)),
+            _apply_quota_rule("miss", conditions=[_subject("user_id", "someone-else")], quota_ids=("miss",)),
+        ]
+        assert collect_quota_ids(rules, _ctx()) == []
+
+    def test_higher_weight_terminal_rule_cannot_skip_a_quota(self):
+        """The old engine's bypass: any higher-weight match ended evaluation."""
+        allow = _rule(
+            name="allow-everything",
+            weight=1000,
+            conditions=ConditionGroup(logic=LogicOp.AND, conditions=()),
+            action=Action(type=ActionType.ALLOW),
         )
-        outcome = apply_action(rule, ctx)
-        assert outcome.block_status == 429
-        assert outcome.block_message == "Over 7.5 (limit 5.0). Wait 23s."
-        assert outcome.retry_after_seconds == 23
-
-    def test_retry_after_is_max_across_two_quota_conditions(self):
-        md = {"quota": {
-            "cost": {"value": 9, "next_free": 12},
-            "requests": {"value": 40, "next_free": 30},
-        }}
-        ctx = _ctx(metadata=md)
-        conds = ConditionGroup(logic=LogicOp.AND, conditions=(
-            _quota_cond(measure="cost"),
-            _quota_cond(measure="requests"),
-        ))
-        rule = _rule(conditions=conds, action=Action(type=ActionType.BLOCK, target="blocked"))
-        outcome = apply_action(rule, ctx)
-        assert outcome.retry_after_seconds == 30
-
-    def test_block_default_status(self):
-        action = _convert_action_dict({"type": "block", "message": "no"})
-        rule = _rule(action=action)
-        outcome = apply_action(rule, _ctx())
-        assert outcome.block_status == 403
-
-
-# --- Service: populate_quota_metadata ---
-
-
-def _aggregate_db(value, oldest_ts):
-    """AsyncSession stub whose execute().one() returns a window aggregate row,
-    counting how many queries were issued."""
-    from unittest.mock import AsyncMock, MagicMock
-
-    row = MagicMock()
-    row.value = value
-    row.oldest_ts = oldest_ts
-    result = MagicMock()
-    result.one.return_value = row
-    db = MagicMock()
-    db.execute = AsyncMock(return_value=result)
-    return db
-
-
-class TestPopulateQuotaMetadata:
-    @pytest.mark.asyncio
-    async def test_no_quota_conditions_runs_zero_queries(self):
-        db = _aggregate_db(0, None)
-        rule = _rule()  # plain parameter condition, no quota
-        ctx = _ctx(user_id=str(uuid.uuid4()))
-        await populate_quota_metadata(db, [rule], ctx)
-        assert db.execute.await_count == 0
-        assert "quota" not in ctx.metadata
-
-    @pytest.mark.asyncio
-    async def test_populates_namespace_and_next_free(self):
-        from datetime import datetime, timezone
-
-        oldest = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-        db = _aggregate_db(Decimal("7.42"), oldest)
-        rule = _rule(
-            conditions=ConditionGroup(logic=LogicOp.AND, conditions=(
-                _quota_cond(measure="cost", threshold=5, window=3600),
-            )),
-            action=Action(type=ActionType.BLOCK, target="blocked"),
+        rewrite = _rule(
+            name="mask",
+            weight=900,
+            conditions=ConditionGroup(logic=LogicOp.AND, conditions=()),
+            action=Action(type=ActionType.REWRITE, pattern="x", replacement="y"),
         )
-        ctx = _ctx(user_id=str(uuid.uuid4()))
-        await populate_quota_metadata(db, [rule], ctx)
-        assert db.execute.await_count == 1
-        bucket = ctx.metadata["quota"]["cost"]
-        assert bucket["value"] == Decimal("7.42")
-        assert bucket["threshold"] == 5
-        assert bucket["window"] == 3600
-        assert isinstance(bucket["next_free"], int)
+        rules = [allow, rewrite, _apply_quota_rule(weight=1, quota_ids=("cap",))]
+        assert evaluate(rules, _ctx()).name == "allow-everything"
+        assert collect_quota_ids(rules, _ctx()) == ["cap"]
+
+    def test_converts_from_stored_json(self):
+        action = _convert_action_dict({"type": "apply_quota", "quota_ids": ["abc"]})
+        assert action.type == ActionType.APPLY_QUOTA
+        assert action.quota_ids == ("abc",)
 
 
-class TestWindowAggregate:
-    @pytest.mark.asyncio
-    async def test_requests_measure_returns_int(self):
-        from datetime import datetime, timezone
-        from ttllm.services import usage_service
+class TestSubjectConditions:
+    def test_scalar_fields(self):
+        ctx = _ctx(user_email="a@example.com", token_id="tok")
+        assert evaluate_condition(_subject("user_email", "a@example.com"), ctx)
+        assert evaluate_condition(_subject("token_id", "tok"), ctx)
+        assert evaluate_condition(_subject("user_id", "user-123"), ctx)
+        assert not evaluate_condition(_subject("user_email", "b@example.com"), ctx)
 
-        db = _aggregate_db(5, datetime(2026, 1, 1, tzinfo=timezone.utc))
-        out = await usage_service.get_window_aggregate(
-            db, uuid.uuid4(), measure="requests", window_seconds=60,
-        )
-        assert out["value"] == 5
-        assert isinstance(out["value"], int)
+    def test_group_matches_any_membership(self):
+        ctx = _ctx(groups=("eng", "admins"))
+        assert evaluate_condition(_subject("group", "admins"), ctx)
+        assert evaluate_condition(_subject("group", ["ops", "eng"], MatchOp.IN), ctx)
+        assert not evaluate_condition(_subject("group", "sales"), ctx)
 
-    @pytest.mark.asyncio
-    async def test_cost_measure_returns_decimal_zero_when_null(self):
-        from ttllm.services import usage_service
+    def test_negated_group_is_true_only_outside_every_group(self):
+        cond = _subject("group", "vip", negate=True)
+        assert evaluate_condition(cond, _ctx(groups=("eng",)))
+        assert evaluate_condition(cond, _ctx())
+        assert not evaluate_condition(cond, _ctx(groups=("eng", "vip")))
 
-        db = _aggregate_db(None, None)
-        out = await usage_service.get_window_aggregate(
-            db, uuid.uuid4(), measure="cost", window_seconds=60,
-        )
-        assert out["value"] == Decimal("0")
+    def test_references_groups(self):
+        assert references_groups([_apply_quota_rule(conditions=[_subject("group", "eng")])])
+        assert not references_groups([_apply_quota_rule(conditions=[_subject("user_id", "x")])])
 
-    @pytest.mark.asyncio
-    async def test_unknown_measure_raises(self):
-        from ttllm.services import usage_service
+    def test_ignores_client_supplied_header_of_the_same_name(self):
+        ctx = _ctx(user_email="real@example.com", headers={"user_email": "forged@example.com"})
+        assert not evaluate_condition(_subject("user_email", "forged@example.com"), ctx)
 
+
+class TestResolvedModelParameter:
+    def _cond(self):
+        return Condition(type=ConditionType.PARAMETER, field="resolved_model", operator=MatchOp.EXACT, value="opus")
+
+    def test_matches_resolved_not_requested_model(self):
+        ctx = _ctx(model="anything-matching-a-pattern", resolved_model="opus")
+        assert evaluate_condition(self._cond(), ctx)
+
+
+class TestRuleDefinitionValidation:
+    GROUP = {"logic": "and", "conditions": []}
+
+    def test_quota_condition_type_is_gone(self):
         with pytest.raises(ValueError):
-            await usage_service.get_window_aggregate(
-                _aggregate_db(0, None), uuid.uuid4(), measure="bogus", window_seconds=60,
-            )
+            ConditionSchema(type="quota", field="cost", operator="gt", value=5)
 
-    @pytest.mark.asyncio
-    async def test_per_model_adds_join_and_filter(self):
-        from ttllm.services import usage_service
+    def test_unknown_subject_field_rejected(self):
+        with pytest.raises(ValueError):
+            ConditionSchema(type="subject", field="x-api-key", value="a")
 
-        db = _aggregate_db(3, None)
-        await usage_service.get_window_aggregate(
-            db, uuid.uuid4(), measure="requests", window_seconds=60, per={"model": "claude-x"},
-        )
-        # Inspect the compiled SQL of the query that was executed.
-        compiled = str(db.execute.await_args.args[0])
-        assert "audit_logs.model_name" in compiled
-        assert "status_code" in compiled
+    def test_apply_quota_requires_valid_ids(self):
+        with pytest.raises(ValueError):
+            RuleCreate(name="r", conditions=self.GROUP, action={"type": "apply_quota", "quota_ids": []})
+        with pytest.raises(ValueError):
+            RuleCreate(name="r", conditions=self.GROUP, action={"type": "apply_quota", "quota_ids": ["nope"]})
 
-    @pytest.mark.asyncio
-    async def test_billable_disconnect_status_counts_toward_window(self):
-        from ttllm.services import usage_service
+    def test_resolved_model_rejected_on_terminal_rules(self):
+        """It's None during terminal evaluation, and a negated condition would then match."""
+        conditions = {
+            "logic": "or",
+            "conditions": [
+                {
+                    "logic": "and",
+                    "conditions": [
+                        {"type": "parameter", "field": "resolved_model", "value": "m", "negate": True},
+                    ],
+                }
+            ],
+        }
+        with pytest.raises(ValueError, match="resolved_model"):
+            validate_rule_definition(conditions, {"type": "block"})
+        validate_rule_definition(conditions, {"type": "apply_quota", "quota_ids": [str(uuid.uuid4())]})
 
-        db = _aggregate_db(3, None)
-        await usage_service.get_window_aggregate(
-            db, uuid.uuid4(), measure="requests", window_seconds=60,
-        )
-
-        query = db.execute.await_args.args[0]
-        compiled = str(query.compile(compile_kwargs={"literal_binds": True}))
-        assert "audit_logs.status_code IN (200, 499)" in compiled
-
-
-class TestNextFree:
-    def test_none_oldest_is_zero(self):
-        from datetime import datetime, timezone
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        assert _next_free(None, 60, now) == 0
-
-    def test_floored_at_zero_when_aged_out(self):
-        from datetime import datetime, timedelta, timezone
-        now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=timezone.utc)
-        oldest = now - timedelta(seconds=120)  # already older than 60s window
-        assert _next_free(oldest, 60, now) == 0
-
-    def test_seconds_until_oldest_exits(self):
-        from datetime import datetime, timedelta, timezone
-        now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=timezone.utc)
-        oldest = now - timedelta(seconds=20)  # 60s window -> 40s remaining
-        assert _next_free(oldest, 60, now) == 40
+    def test_legacy_quota_rule_cannot_pass_definition_check(self):
+        """What stops a rule disabled by migration 020 from being switched back on."""
+        legacy = {"logic": "and", "conditions": [{"type": "quota", "field": "cost", "value": 5, "window": 60}]}
+        with pytest.raises(ValueError):
+            validate_rule_definition(legacy, {"type": "block"})

@@ -81,6 +81,12 @@ class Permissions:
     RULE_MODIFY = _define("rule.modify", "Update rules", "management")
     RULE_DELETE = _define("rule.delete", "Delete rules", "management")
 
+    # --- Quota ---
+    QUOTA_VIEW = _define("quota.view", "View quotas and their buckets", "management")
+    QUOTA_CREATE = _define("quota.create", "Create quotas", "management")
+    QUOTA_MODIFY = _define("quota.modify", "Update and reset quotas", "management")
+    QUOTA_DELETE = _define("quota.delete", "Delete quotas", "management")
+
     # --- Token ---
     TOKEN_CREATE = _define("token.create", "Generate gateway tokens", "management")
     TOKEN_DELETE = _define("token.delete", "Revoke gateway tokens", "management")

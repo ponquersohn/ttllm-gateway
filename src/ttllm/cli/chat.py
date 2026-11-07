@@ -24,7 +24,13 @@ def _handle_chat_error(resp: httpx.Response, model: str, url: str) -> None:
     elif status == 404:
         console.print(f"[red]Endpoint not found. Check the gateway URL: {url}[/red]")
     elif status == 429:
-        console.print("[red]Rate limited. Try again later.[/red]")
+        try:
+            message = resp.json()["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            message = "Rate limited. Try again later."
+        retry_after = resp.headers.get("retry-after")
+        hint = f" Retry in {retry_after}s." if retry_after else ""
+        console.print(f"{message}{hint}", style="red", markup=False)
     else:
         try:
             detail = resp.json()

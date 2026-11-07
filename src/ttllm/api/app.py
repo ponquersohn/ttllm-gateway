@@ -123,6 +123,15 @@ def create_app() -> FastAPI:
         allow_credentials=allow_creds,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Browsers hide non-safelisted response headers from scripts unless they're exposed.
+        expose_headers=[
+            "Retry-After",
+            "X-Request-Id",
+            "x-ttllm-quota-name",
+            "x-ttllm-quota-limit",
+            "x-ttllm-quota-remaining",
+            "x-ttllm-quota-reset",
+        ],
     )
 
     # Exception handlers matching Anthropic error format

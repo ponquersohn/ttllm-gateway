@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Numeric, String, cast, func, select
@@ -22,63 +21,18 @@ def _total_cost_sum():
     return func.sum(cast(func.nullif(AuditLog.total_cost, ""), Numeric(38, 18)))
 
 
-_WINDOW_MEASURES = {
-    "cost": lambda: _total_cost_sum(),
-    "tokens": lambda: func.sum(AuditLog.input_tokens + AuditLog.output_tokens),
-    "requests": lambda: func.count(AuditLog.id),
-}
+def _quota_blocked():
+    """Audit rows written for a quota denial (they carry ``metadata_json["quota"]``).
 
-_BILLABLE_STATUS_CODES = (200, 499)
-
-
-async def get_window_aggregate(
-    db: AsyncSession,
-    user_id: uuid.UUID,
-    *,
-    measure: str,
-    window_seconds: int,
-    per: dict[str, Any] | None = None,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Aggregate a user's successful usage over a trailing moving window.
-
-    Used by the rules engine's quota conditions. ``measure`` is one of
-    ``cost`` / ``tokens`` / ``requests``. Returns ``{"value", "oldest_ts"}``
-    where ``oldest_ts`` is the earliest contributing row (used to compute when
-    the window frees up). Only billable rows count — completed requests and
-    client-disconnected streams that still reached final provider usage metadata.
-
-    ``per`` optionally narrows the window by dimension; currently only
-    ``{"model": "<name>"}`` is supported (exact model-name scoping).
+    They record a request that never reached a provider, so usage aggregates leave them out:
+    a client retrying a blocked request in a loop would otherwise inflate request counts and
+    drag down average latency. The summary reports them separately.
     """
-    measure_fn = _WINDOW_MEASURES.get(measure)
-    if measure_fn is None:
-        raise ValueError(f"unknown quota measure: {measure}")
+    return func.coalesce(AuditLog.metadata_json.has_key("quota"), False)
 
-    now = now or datetime.now(timezone.utc)
-    window_start = now - timedelta(seconds=window_seconds)
 
-    query = select(
-        measure_fn().label("value"),
-        func.min(AuditLog.created_at).label("oldest_ts"),
-    ).where(
-        AuditLog.user_id == user_id,
-        AuditLog.created_at >= window_start,
-        AuditLog.status_code.in_(_BILLABLE_STATUS_CODES),
-    )
-
-    per = per or {}
-    model_name = per.get("model")
-    if model_name is not None:
-        query = query.where(AuditLog.model_name == model_name)
-
-    row = (await db.execute(query)).one()
-    value = row.value
-    if measure == "requests":
-        value = int(value or 0)
-    else:
-        value = Decimal(value) if value is not None else Decimal("0")
-    return {"value": value, "oldest_ts": row.oldest_ts}
+def _served():
+    return _quota_blocked().is_(False)
 
 
 async def get_usage_summary(
@@ -90,10 +44,11 @@ async def get_usage_summary(
 ) -> dict[str, Any]:
     """Get aggregated usage statistics."""
     query = select(
-        func.count(AuditLog.id).label("total_requests"),
+        func.count(AuditLog.id).filter(_served()).label("total_requests"),
+        func.count(AuditLog.id).filter(_quota_blocked()).label("quota_blocked_requests"),
         func.sum(AuditLog.input_tokens).label("total_input_tokens"),
         func.sum(AuditLog.output_tokens).label("total_output_tokens"),
-        func.avg(AuditLog.latency_ms).label("avg_latency_ms"),
+        func.avg(AuditLog.latency_ms).filter(_served()).label("avg_latency_ms"),
         _total_cost_sum().label("total_cost"),
     )
 
@@ -111,6 +66,7 @@ async def get_usage_summary(
 
     return {
         "total_requests": row.total_requests or 0,
+        "quota_blocked_requests": row.quota_blocked_requests or 0,
         "total_input_tokens": row.total_input_tokens or 0,
         "total_output_tokens": row.total_output_tokens or 0,
         "avg_latency_ms": round(float(row.avg_latency_ms or 0), 1),
@@ -139,6 +95,7 @@ async def get_cost_breakdown(
             func.sum(AuditLog.output_tokens).label("output_tokens"),
             _total_cost_sum().label("total_cost"),
         )
+        .where(_served())
         .group_by(AuditLog.model_name)
     )
 
@@ -195,6 +152,7 @@ async def get_user_usage_summary(
             func.sum(AuditLog.output_tokens).label("output_tokens"),
             total_cost.label("total_cost"),
         )
+        .where(_served())
         .group_by(AuditLog.user_email)
         .order_by(func.coalesce(total_cost, 0).desc())
     )

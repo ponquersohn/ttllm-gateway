@@ -108,7 +108,7 @@ def _params_hash(params: dict[str, Any]) -> str:
 
 
 def _openai_factory(llm_model: Any, invoke_params: dict[str, Any]) -> BaseChatModel:
-    from langchain_community.chat_models import ChatOpenAI
+    from langchain_openai import ChatOpenAI
 
     config = llm_model.config_json or {}
     base_url = config.get("base_url")
@@ -118,8 +118,11 @@ def _openai_factory(llm_model: Any, invoke_params: dict[str, Any]) -> BaseChatMo
         model=llm_model.provider_model_id,
         max_tokens=invoke_params.get("max_tokens", 4096),
         temperature=invoke_params.get("temperature", 1.0),
-        openai_api_key=config.get("api_key", ""),
-        openai_api_base=base_url,
+        api_key=config.get("api_key", ""),
+        base_url=base_url,
+        # Without this the final streamed chunk carries no usage, so tokens, cost and quotas
+        # would all read as zero.
+        stream_usage=True,
     )
 
 

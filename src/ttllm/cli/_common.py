@@ -160,3 +160,14 @@ def resolve_rule(client: httpx.Client, name: str) -> str:
             return r["id"]
     console.print(f"[red]Rule not found: {name}[/red]")
     raise typer.Exit(1)
+
+
+def resolve_quota(client: httpx.Client, name: str) -> str:
+    """Resolve a quota name to a quota ID."""
+    data = handle_response(client.get("/admin/quotas", params={"limit": 200}))
+    needle = name.lower()
+    for q in data["items"]:
+        if q["name"].lower() == needle:
+            return q["id"]
+    console.print(f"[red]Quota not found: {name}[/red]")
+    raise typer.Exit(1)
