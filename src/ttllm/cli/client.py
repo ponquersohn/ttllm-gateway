@@ -101,6 +101,26 @@ class TTLLMClient(httpx.Client):
             "base_url": base_url,
         })
 
+    @staticmethod
+    def device_code(base_url: str, client_name: str | None = None) -> httpx.Response:
+        """Start a device code login (RFC 8628)."""
+        return httpx.post(
+            f"{base_url}/auth/device/code",
+            json={"client_name": client_name},
+            timeout=10,
+            verify=ssl_context(),
+        )
+
+    @staticmethod
+    def device_token(base_url: str, device_code: str) -> httpx.Response:
+        """Poll once for the result of a device code login."""
+        return httpx.post(
+            f"{base_url}/auth/device/token",
+            json={"device_code": device_code},
+            timeout=10,
+            verify=ssl_context(),
+        )
+
     def logout(self) -> None:
         """Revoke the refresh token (best-effort) and clear the local session."""
         session = self.load_session()

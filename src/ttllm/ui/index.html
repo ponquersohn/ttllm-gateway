@@ -187,6 +187,29 @@ tr:hover td{background:rgba(0,0,0,.015)}
 
 <!-- Dashboard View -->
 <div id="dashboard-view" class="container hidden">
+  <!-- Device login approval (RFC 8628), shown when opened via `ttllm login --device` -->
+  <div id="device-panel" class="panel hidden">
+    <div class="panel-header">
+      <h3>Approve device login</h3>
+    </div>
+    <p>A command-line client is asking to sign in as you. Only approve if you started this login yourself.</p>
+    <form id="device-form">
+      <div class="form-row">
+        <div class="form-group">
+          <label for="device-user-code">Code shown in your terminal</label>
+          <input type="text" id="device-user-code" placeholder="XXXX-XXXX" autocomplete="off" required>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary" id="device-lookup-btn">Continue</button>
+      <button type="button" class="btn btn-secondary" id="device-dismiss-btn">Dismiss</button>
+    </form>
+    <div id="device-confirm" class="hidden">
+      <div id="device-details"></div>
+      <button type="button" class="btn btn-primary" id="device-approve-btn">Approve</button>
+      <button type="button" class="btn btn-danger" id="device-deny-btn">Deny</button>
+    </div>
+  </div>
+
   <div class="tabs">
     <button class="tab active" data-tab="tokens">Tokens</button>
     <button class="tab" data-tab="models">Models</button>
@@ -381,7 +404,69 @@ tr:hover td{background:rgba(0,0,0,.015)}
     $("#logout-btn").addEventListener("click", doLogout);
     loadTokens();
     loadModels();
+    maybeShowDevicePanel();
   }
+
+  // --- Device login approval ---
+  var DEVICE_KEY = "pending_device_login";
+
+  function hideDevicePanel() {
+    try { sessionStorage.removeItem(DEVICE_KEY); } catch (_) {}
+    $("#device-panel").classList.add("hidden");
+  }
+
+  function maybeShowDevicePanel() {
+    var pending = null;
+    try { pending = sessionStorage.getItem(DEVICE_KEY); } catch (_) {}
+    if (pending === null) return;
+    $("#device-user-code").value = pending;
+    $("#device-form").classList.remove("hidden");
+    $("#device-confirm").classList.add("hidden");
+    $("#device-panel").classList.remove("hidden");
+  }
+
+  async function deviceLookup(code) {
+    var resp = await apiFetch("/auth/device/lookup?user_code=" + encodeURIComponent(code));
+    if (!resp) return;
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return null; });
+      toast((err && err.error && err.error.message) || "Code not found", "error");
+      return;
+    }
+    var d = await resp.json();
+    var ageMin = Math.max(0, Math.round((Date.now() - new Date(d.created_at).getTime()) / 60000));
+    $("#device-details").innerHTML =
+      '<p><strong>Client:</strong> ' + escapeHtml(d.client_name || "unknown") + '<br>' +
+      '<strong>From IP:</strong> ' + escapeHtml(d.requester_ip || "unknown") + '<br>' +
+      '<strong>User agent:</strong> ' + escapeHtml(d.requester_user_agent || "unknown") + '<br>' +
+      '<strong>Requested:</strong> ' + ageMin + ' min ago</p>';
+    $("#device-form").classList.add("hidden");
+    $("#device-confirm").classList.remove("hidden");
+  }
+
+  async function deviceResolve(approve) {
+    var code = $("#device-user-code").value.trim();
+    var resp = await apiFetch("/auth/device/approve", {
+      method: "POST",
+      body: { user_code: code, approve: approve },
+    });
+    if (!resp) return;
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return null; });
+      toast((err && err.error && err.error.message) || "Request failed", "error");
+      return;
+    }
+    hideDevicePanel();
+    toast(approve ? "Device approved. Return to your terminal." : "Device login denied.", "success");
+  }
+
+  $("#device-form").addEventListener("submit", function(e) {
+    e.preventDefault();
+    deviceLookup($("#device-user-code").value.trim());
+  });
+  $("#device-dismiss-btn").addEventListener("click", hideDevicePanel);
+  $("#device-approve-btn").addEventListener("click", function() { deviceResolve(true); });
+  $("#device-deny-btn").addEventListener("click", function() { deviceResolve(false); });
 
   // --- Login ---
   async function doLocalLogin(email, password) {
@@ -1008,6 +1093,11 @@ tr:hover td{background:rgba(0,0,0,.015)}
     loadVersion();
     // Check for SSO callback tokens in URL
     var params = new URLSearchParams(window.location.search);
+    // Device login link: stash the code so it survives the SSO round-trip.
+    if (params.has("device") || params.has("user_code")) {
+      try { sessionStorage.setItem(DEVICE_KEY, params.get("user_code") || ""); } catch (_) {}
+      history.replaceState(null, "", window.location.pathname);
+    }
     if (params.has("error")) {
       // SSO callback rejected the login (e.g. deactivated account).
       var ssoError = params.get("error_description") || params.get("error");
