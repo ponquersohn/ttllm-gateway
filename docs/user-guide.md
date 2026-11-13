@@ -32,6 +32,19 @@ ttllm login --idp entra --url https://gateway.example.com
 
 This opens your browser to complete authentication with your identity provider. Once complete, the CLI receives your session automatically.
 
+### Device login (SSH / headless machines)
+
+If the machine running the CLI has no browser, for example over SSH or in a container:
+
+```bash
+ttllm login --device --url https://gateway.example.com
+```
+
+The CLI prints a short code and a link. Open the link in a browser on any device, sign in
+(password or SSO), check that the request comes from your machine, and click **Approve**.
+The CLI finishes logging in by itself. The code expires after 10 minutes. Deny anything you
+didn't start yourself.
+
 ### Environment variable
 
 You can set the gateway URL once to avoid passing `--url` every time:

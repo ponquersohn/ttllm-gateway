@@ -508,6 +508,9 @@ ttllm models create \
 Admin operations via the `ttllm` CLI:
 
 ```bash
+ttllm login [--url URL]              # Email + password login
+ttllm login --idp <slug>             # SSO login (opens a local browser)
+ttllm login --device                 # Device code login: approve from any browser (SSH/headless)
 ttllm status                         # Show server version, status, and config checks
 ttllm whoami                         # Show current user, groups, and permissions
 ttllm me models                      # List models available to you
@@ -589,6 +592,23 @@ A browser-based UI is available at `/ui` for self-service tasks without needing 
 Navigate to `http://localhost:8000/ui` (or your deployed base URL + `/ui`). The UI uses only `/me/` endpoints — no admin access is exposed.
 
 Authentication state is stored in `sessionStorage`, so it is scoped to the browser tab and cleared when the tab is closed.
+
+### Device login approval
+
+`ttllm login --device` (RFC 8628 device code flow) prints a code and a link to
+`<base_url>/ui/?device=1&user_code=XXXX-XXXX`. The user signs in to the UI as usual
+(password or SSO), checks the requesting client, IP, and user agent, and approves or denies.
+The CLI polls and receives the same management tokens a normal login issues.
+
+Endpoints:
+
+- `POST /auth/device/code` (public): `{client_name?}` returns `device_code`, `user_code`, `verification_uri`, `verification_uri_complete`, `expires_in` (600), and `interval` (5)
+- `POST /auth/device/token` (public): `{device_code}` returns tokens, or a 400 with error type `authorization_pending`, `slow_down`, `access_denied`, or `expired_token`
+- `GET /auth/device/lookup?user_code=` and `POST /auth/device/approve` `{user_code, approve}`: require a login-session JWT; gateway API tokens are rejected
+
+Device and user codes are stored only as SHA-256 hashes in `device_authorizations`, expire after
+10 minutes, and can be used once. Verification links are built from `engine.base_url`, so set it
+to the public gateway URL.
 
 ### Public API
 

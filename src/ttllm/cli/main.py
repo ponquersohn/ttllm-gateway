@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import html
+import socket
+import time
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional
@@ -37,9 +39,17 @@ app.command("chat")(chat.chat)
 def login(
     idp: Optional[str] = typer.Option(None, "--idp", help="Identity provider slug for SSO login"),
     url: str = typer.Option("http://localhost:4000", "--url", help="TTLLM API base URL"),
+    device: bool = typer.Option(
+        False, "--device", help="Device code login: approve from any browser (for SSH/headless machines)"
+    ),
 ):
-    """Log in to TTLLM. Uses email+password by default, or --idp for SSO."""
-    if idp:
+    """Log in to TTLLM. Uses email+password by default, --idp for SSO, or --device for device code."""
+    if device and idp:
+        console.print("[red]--device and --idp are mutually exclusive[/red] (pick the login method in the browser).")
+        raise typer.Exit(2)
+    if device:
+        _login_device(url)
+    elif idp:
         _login_sso(idp, url)
     else:
         _login_local(url)
@@ -61,10 +71,63 @@ def _login_local(base_url: str):
     console.print("[green]Login successful.[/green]")
 
 
+def _error_info(resp) -> tuple[str, str]:
+    """Extract (type, message) from a gateway error response."""
+    try:
+        err = resp.json().get("error") or {}
+        return err.get("type") or "", err.get("message") or resp.text
+    except (ValueError, AttributeError):
+        return "", resp.text
+
+
+def _login_device(base_url: str):
+    """Device code login (RFC 8628): show a code, user approves in any browser, CLI polls."""
+    from rich.panel import Panel
+
+    resp = TTLLMClient.device_code(base_url, client_name=f"ttllm-cli@{socket.gethostname()}")
+    if resp.status_code != 200:
+        console.print(f"[red]Device login failed:[/red] {_error_info(resp)[1]}")
+        raise typer.Exit(1)
+    data = resp.json()
+
+    console.print(Panel(
+        f"Open [bold]{data['verification_uri']}[/bold]\n"
+        f"and enter the code: [bold cyan]{data['user_code']}[/bold cyan]\n\n"
+        f"Or open directly: {data['verification_uri_complete']}",
+        title="Device login",
+        expand=False,
+    ))
+
+    interval = int(data.get("interval") or 5)
+    deadline = time.monotonic() + int(data.get("expires_in") or 600)
+    try:
+        with console.status("Waiting for approval..."):
+            while time.monotonic() < deadline:
+                time.sleep(interval)
+                resp = TTLLMClient.device_token(base_url, data["device_code"])
+                if resp.status_code == 200:
+                    tokens = resp.json()
+                    TTLLMClient.login_with_tokens(base_url, tokens["access_token"], tokens.get("refresh_token"))
+                    break
+                err_type, message = _error_info(resp)
+                if err_type == "authorization_pending":
+                    continue
+                if err_type == "slow_down":
+                    interval += 5
+                    continue
+                console.print(f"[red]Device login failed:[/red] {message}")
+                raise typer.Exit(1)
+            else:
+                console.print("[red]Device login failed:[/red] the code expired before it was approved.")
+                raise typer.Exit(1)
+    except KeyboardInterrupt:
+        console.print("[yellow]Device login cancelled.[/yellow]")
+        raise typer.Exit(130)
+    console.print("[green]Device login successful.[/green]")
+
+
 def _login_sso(idp_slug: str, base_url: str):
     """SSO login: open browser -> IdP -> API callback -> redirect to CLI with tokens."""
-    import socket
-
     # Find a free port for the ephemeral callback server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))

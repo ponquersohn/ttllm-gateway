@@ -12,8 +12,18 @@ from fastapi.responses import RedirectResponse
 from ttllm.api.deps import AuthContext, DB, get_authenticated
 from ttllm.config import settings
 from ttllm.core import oidc
-from ttllm.schemas.auth import LoginRequest, LoginTokenResponse, RefreshRequest
-from ttllm.services import auth_service, oidc_state_service
+from ttllm.core.device_flow import PollOutcome
+from ttllm.schemas.auth import (
+    DeviceApproveRequest,
+    DeviceCodeRequest,
+    DeviceCodeResponse,
+    DeviceLookupResponse,
+    DeviceTokenRequest,
+    LoginRequest,
+    LoginTokenResponse,
+    RefreshRequest,
+)
+from ttllm.services import auth_service, device_auth_service, oidc_state_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -97,6 +107,114 @@ async def logout(
     if rt:
         rt.revoked_at = datetime.now(UTC)
         await db.commit()
+
+
+# --- Device code flow (RFC 8628) ---
+
+_DEVICE_POLL_MESSAGES = {
+    PollOutcome.AUTHORIZATION_PENDING: "The authorization request is still pending",
+    PollOutcome.SLOW_DOWN: "Polling too fast; increase the interval by 5 seconds",
+    PollOutcome.ACCESS_DENIED: "The authorization request was denied",
+    PollOutcome.EXPIRED_TOKEN: "The device code has expired",
+}
+
+
+def _device_not_found() -> HTTPException:
+    return HTTPException(
+        404, detail={"type": "not_found", "message": "Unknown or expired device code"}
+    )
+
+
+@router.post("/device/code", response_model=DeviceCodeResponse)
+async def device_code(body: DeviceCodeRequest, request: Request, db: DB):
+    """Start a device code login. The CLI shows `user_code` and polls /auth/device/token."""
+    row, raw_device_code, user_code = await device_auth_service.create(
+        db,
+        client_name=body.client_name,
+        requester_ip=request.client.host if request.client else None,
+        requester_user_agent=request.headers.get("user-agent"),
+    )
+    await db.commit()
+
+    base = settings.engine.base_url.rstrip("/")
+    verification_uri = f"{base}/ui/?device=1"
+    return DeviceCodeResponse(
+        device_code=raw_device_code,
+        user_code=user_code,
+        verification_uri=verification_uri,
+        verification_uri_complete=f"{verification_uri}&user_code={user_code}",
+        expires_in=device_auth_service.expires_in(row),
+        interval=row.interval_seconds,
+    )
+
+
+@router.post("/device/token", response_model=LoginTokenResponse)
+async def device_token(body: DeviceTokenRequest, db: DB):
+    """Poll for the result of a device code login."""
+    outcome, user = await device_auth_service.poll(db, body.device_code)
+    await db.commit()
+
+    if outcome is None:
+        # Unknown, already used, or swept: indistinguishable from expiry to the client.
+        outcome = PollOutcome.EXPIRED_TOKEN
+    if outcome != PollOutcome.APPROVED:
+        raise HTTPException(
+            400, detail={"type": outcome.value, "message": _DEVICE_POLL_MESSAGES[outcome]}
+        )
+    assert user is not None
+    if not user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail={"type": "permission_error", "message": auth_service.INACTIVE_USER_MESSAGE},
+        )
+    return await auth_service.create_management_tokens(db, user)
+
+
+async def _require_session(ctx: AuthContext, db) -> None:
+    """Device approval needs an interactive login session, not a gateway API token."""
+    if await auth_service.token_exists(db, ctx.jti):
+        raise HTTPException(
+            403,
+            detail={
+                "type": "permission_error",
+                "message": "Device logins must be approved from a login session, not an API token",
+            },
+        )
+
+
+@router.get("/device/lookup", response_model=DeviceLookupResponse)
+async def device_lookup(
+    user_code: str,
+    db: DB,
+    ctx: AuthContext = Depends(get_authenticated),
+):
+    """Describe a pending device login so the user can confirm it before approving."""
+    await _require_session(ctx, db)
+    row = await device_auth_service.get_pending_by_user_code(db, user_code)
+    if row is None:
+        raise _device_not_found()
+    response = DeviceLookupResponse(
+        client_name=row.client_name,
+        requester_ip=row.requester_ip,
+        requester_user_agent=row.requester_user_agent,
+        created_at=row.created_at,
+        expires_at=row.expires_at,
+    )
+    await db.rollback()  # release the row lock taken by the lookup
+    return response
+
+
+@router.post("/device/approve", status_code=204)
+async def device_approve(
+    body: DeviceApproveRequest,
+    db: DB,
+    ctx: AuthContext = Depends(get_authenticated),
+):
+    """Approve (or deny) a pending device login as the authenticated user."""
+    await _require_session(ctx, db)
+    if not await device_auth_service.resolve(db, body.user_code, ctx.user, body.approve):
+        raise _device_not_found()
+    await db.commit()
 
 
 # --- SSO (OIDC) ---

@@ -27,6 +27,39 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+# --- Device code flow (RFC 8628) ---
+
+
+class DeviceCodeRequest(BaseModel):
+    client_name: str | None = None
+
+
+class DeviceCodeResponse(BaseModel):
+    device_code: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: str
+    expires_in: int
+    interval: int
+
+
+class DeviceTokenRequest(BaseModel):
+    device_code: str
+
+
+class DeviceLookupResponse(BaseModel):
+    client_name: str | None
+    requester_ip: str | None
+    requester_user_agent: str | None
+    created_at: datetime
+    expires_at: datetime
+
+
+class DeviceApproveRequest(BaseModel):
+    user_code: str
+    approve: bool = True
+
+
 # --- Groups ---
 
 
