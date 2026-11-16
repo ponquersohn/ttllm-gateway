@@ -32,11 +32,12 @@ class LLMModel(Base):
     output_cost_per_1k: Mapped[Decimal] = mapped_column(
         Numeric(10, 6), default=Decimal("0")
     )
-    cache_read_cost_per_1k: Mapped[Decimal] = mapped_column(
-        Numeric(10, 6), default=Decimal("0")
+    # NULL = not set: cache tokens are billed at input_cost_per_1k.
+    cache_read_cost_per_1k: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 6), nullable=True, default=None
     )
-    cache_write_cost_per_1k: Mapped[Decimal] = mapped_column(
-        Numeric(10, 6), default=Decimal("0")
+    cache_write_cost_per_1k: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 6), nullable=True, default=None
     )
     match_pattern: Mapped[str | None] = mapped_column(String(512), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

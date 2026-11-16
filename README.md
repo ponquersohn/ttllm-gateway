@@ -289,9 +289,9 @@ POST /admin/rules
 
 | Type | Field | Description |
 |------|-------|-------------|
-| `parameter` | `model`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stream`, `resolved_model` (`apply_quota` rules only) | Match on request parameters |
+| `parameter` | `model`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stream`, `resolved_model` | Match on request parameters. `model` is the name the client sent; `resolved_model` is the model that will serve it — use `resolved_model` for block/reroute/quota rules, since any name a model's `match_pattern` accepts reaches the same model |
 | `header` | any header name | Match on HTTP headers (case-insensitive) |
-| `content` | `messages` or `system` | Match on message/system text |
+| `content` | `messages` or `system` | Match on message/system text, including text inside tool results, documents, search results and tool-call arguments |
 | `function` | `count_tokens`, `message_length`, `keyword_count` | Match on computed values |
 | `subject` | `user_id`, `user_email`, `token_id`, `group` | Match on the authenticated caller, which clients can't influence |
 
@@ -308,7 +308,7 @@ All conditions support `negate: true` to invert the match.
 | `reroute` | `target` | Change target model name before resolution |
 | `block` | `message`, `status_code` | Reject the request. `status_code` defaults to 403 |
 | `allow` | — | Explicitly pass through (skip remaining rules) |
-| `rewrite` | `pattern`, `replacement` | Regex replace in message content |
+| `rewrite` | `pattern`, `replacement` | Regex replace in message and system content (every place a `content` condition matches, except signed thinking blocks) |
 | `apply_quota` | `quota_ids` | Attach [quotas](#quotas). Not terminal: every matching rule applies, and no other rule can skip it |
 
 ### Condition Groups
@@ -473,9 +473,9 @@ ttllm models create \
 ```
 
 - `--input-cost` / `--output-cost` — price per 1K fresh input and output tokens.
-- `--cache-read-cost` / `--cache-write-cost` — price per 1K prompt-cache read and write tokens (Bedrock). Cache-read tokens are billed at this rate **instead of** the input rate, not in addition to it. Defaults to `0` when unset, so existing models bill cache reads at no extra cost until prices are configured.
+- `--cache-read-cost` / `--cache-write-cost` — price per 1K prompt-cache read and write tokens (Bedrock). Cache-read tokens are billed at this rate **instead of** the input rate, not in addition to it. When unset (null), cache tokens are billed at the model's **input** rate, so cached prompts can't slip past cost quotas for free. An explicit `0` is respected. Migration `022` converted existing `0` cache prices (the old default) to unset.
 
-All four are also accepted by `ttllm models update` with the same flags.
+All four are also accepted by `ttllm models update` with the same flags. `ttllm models update --reset-cache-costs` unsets both cache prices again (API: send `null` for `cache_read_cost_per_1k` / `cache_write_cost_per_1k`).
 
 To update individual keys within `config_json` without replacing the entire object, pass `--merge-config`:
 
@@ -537,7 +537,7 @@ Every command accepts `--json` for machine-readable output instead of formatted 
 
 ### Self-Service Endpoints
 
-Any authenticated user (including gateway-only users) can access the `/me` endpoints to discover their available models and manage their own tokens:
+Any authenticated user (including gateway-only users) can access the `/me` endpoints to discover their available models and manage their own tokens. The `/me/tokens` endpoints require a login-session JWT (password, SSO or device login): a gateway API token is rejected, so a leaked key can't mint new or broader credentials. Likewise, when `POST /admin/tokens` is called with an API token rather than a login session, the new token's permissions must be a subset of the caller's token:
 
 | Endpoint | Description |
 |---|---|

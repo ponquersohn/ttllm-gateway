@@ -22,8 +22,8 @@ async def create_model(
     config_json: dict | None = None,
     input_cost_per_1k: Decimal = Decimal("0"),
     output_cost_per_1k: Decimal = Decimal("0"),
-    cache_read_cost_per_1k: Decimal = Decimal("0"),
-    cache_write_cost_per_1k: Decimal = Decimal("0"),
+    cache_read_cost_per_1k: Decimal | None = None,
+    cache_write_cost_per_1k: Decimal | None = None,
     match_pattern: str | None = None,
 ) -> LLMModel:
     model = LLMModel(
@@ -89,8 +89,11 @@ async def update_model(
     # the mutable, human-friendly label. ModelUpdate doesn't even expose "name", but the
     # API layer passes **kwargs straight from a dict, so this is the actual enforcement.
     _MUTABLE_FIELDS = {"display_name", "provider", "provider_model_id", "config_json", "input_cost_per_1k", "output_cost_per_1k", "cache_read_cost_per_1k", "cache_write_cost_per_1k", "is_active", "match_pattern"}
+    # Cache prices are nullable (null = bill at the input rate), so an explicit None
+    # resets them. The API passes only the fields the caller actually sent.
+    _NULLABLE_FIELDS = {"cache_read_cost_per_1k", "cache_write_cost_per_1k"}
     for key, value in kwargs.items():
-        if key in _MUTABLE_FIELDS and value is not None:
+        if key in _MUTABLE_FIELDS and (value is not None or key in _NULLABLE_FIELDS):
             setattr(model, key, value)
     await db.commit()
     await db.refresh(model)
@@ -114,6 +117,10 @@ async def delete_model(db: AsyncSession, model_id: uuid.UUID) -> bool:
     return True
 
 
+def _price_or_none(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
+
+
 def build_model_snapshot(model: LLMModel) -> dict:
     """Point-in-time dump of a model, for audit_logs.model_snapshot.
 
@@ -131,8 +138,8 @@ def build_model_snapshot(model: LLMModel) -> dict:
         "config_json": model.config_json,
         "input_cost_per_1k": str(model.input_cost_per_1k),
         "output_cost_per_1k": str(model.output_cost_per_1k),
-        "cache_read_cost_per_1k": str(model.cache_read_cost_per_1k),
-        "cache_write_cost_per_1k": str(model.cache_write_cost_per_1k),
+        "cache_read_cost_per_1k": _price_or_none(model.cache_read_cost_per_1k),
+        "cache_write_cost_per_1k": _price_or_none(model.cache_write_cost_per_1k),
         "match_pattern": model.match_pattern,
         "is_active": model.is_active,
     }

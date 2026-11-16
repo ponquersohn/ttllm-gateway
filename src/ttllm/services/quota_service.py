@@ -147,7 +147,9 @@ async def _in_flight_by_bucket(
     in_flight: dict[uuid.UUID, Decimal] = {}
     for row in rows:
         if windows[row.bucket_id] == row.window_start:
-            in_flight[row.bucket_id] = row.amount
+            # Clamped: reservations are never negative, but a negative sum would let an
+            # exhausted bucket admit requests, so don't trust it.
+            in_flight[row.bucket_id] = max(row.amount, Decimal(0))
     return in_flight
 
 
@@ -350,22 +352,49 @@ async def settle(session: AsyncSession, lease: QuotaLease, usage: ActualUsage) -
 # --- Estimates ---
 
 
-def _strip_base64(value: Any) -> Any:
+# A base64 payload's length says little about its token cost, so it's left out of the
+# serialized request and estimated by kind instead. Leaving it out entirely would let a
+# large base64 document reserve almost nothing, so a strict quota could be overshot by
+# every concurrent request's worth of it.
+# Anthropic caps one image at about 1600 tokens.
+_IMAGE_ESTIMATE_CHARS = 1600 * 4
+# Binary documents (pdf, docx, ...): decoded bytes per estimated character. A heuristic:
+# compressed text-heavy PDFs carry roughly this much text per byte.
+_BINARY_BYTES_PER_CHAR = 2
+_TEXT_MEDIA_TYPES = {"application/json", "application/xml", "application/x-yaml", "application/yaml"}
+
+
+def _base64_estimate_chars(source: dict) -> int:
+    media_type = str(source.get("media_type") or "").lower()
+    decoded_bytes = len(source.get("data") or "") * 3 // 4
+    if media_type.startswith("image/"):
+        return _IMAGE_ESTIMATE_CHARS
+    if media_type.startswith("text/") or media_type in _TEXT_MEDIA_TYPES:
+        return decoded_bytes
+    return decoded_bytes // _BINARY_BYTES_PER_CHAR
+
+
+def _strip_base64(value: Any, extra_chars: list[int] | None = None) -> Any:
+    """Drop base64 ``data`` from ``value``, adding each payload's estimated size in
+    characters to ``extra_chars`` when given."""
     if isinstance(value, dict):
         if value.get("type") == "base64":
+            if extra_chars is not None:
+                extra_chars.append(_base64_estimate_chars(value))
             return {k: v for k, v in value.items() if k != "data"}
-        return {k: _strip_base64(v) for k, v in value.items()}
+        return {k: _strip_base64(v, extra_chars) for k, v in value.items()}
     if isinstance(value, list):
-        return [_strip_base64(v) for v in value]
+        return [_strip_base64(v, extra_chars) for v in value]
     return value
 
 
 def build_estimate(body: MessagesRequest, llm_model: Any) -> RequestEstimate:
     """Estimate from the whole serialized request (tool definitions and tool results count
-    too), leaving out base64 payloads, whose length says little about their token cost."""
-    serialized = json.dumps(_strip_base64(body.model_dump(exclude_none=True)), default=str)
+    too). Base64 payloads are estimated by media type instead of by their encoded length."""
+    extra_chars: list[int] = []
+    serialized = json.dumps(_strip_base64(body.model_dump(exclude_none=True), extra_chars), default=str)
     return RequestEstimate(
-        input_chars=len(serialized),
+        input_chars=len(serialized) + sum(extra_chars),
         max_tokens=body.max_tokens,
         input_cost_per_1k=Decimal(str(llm_model.input_cost_per_1k or 0)),
         output_cost_per_1k=Decimal(str(llm_model.output_cost_per_1k or 0)),

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import re
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +32,18 @@ from ttllm.core.rules import (
 )
 from ttllm.models.quota import Quota
 from ttllm.models.rule import Rule
-from ttllm.schemas.anthropic import MessagesRequest
+from ttllm.schemas.anthropic import (
+    ContentSource,
+    DocumentBlock,
+    DocumentSource,
+    MessagesRequest,
+    PlainTextSource,
+    SearchResultBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ttllm.schemas.rules import iter_condition_dicts, validate_rule_definition
 from ttllm.services import group_service
 
@@ -108,6 +121,15 @@ async def _validate_enabled_rule(db: AsyncSession, name: str, conditions: dict, 
         raise RuleValidationError(str(exc)) from exc
 
     if action.get("type") != "apply_quota":
+        if action.get("type") in ("block", "reroute") and any(
+            c.get("type") == "parameter" and c.get("field") == "model" for c in iter_condition_dicts(conditions)
+        ):
+            logger.warning(
+                "Rule '%s' matches on the requested 'model', which clients can vary by sending "
+                "any name a model's match_pattern accepts; use 'resolved_model' to match the "
+                "model that will actually serve the request",
+                name,
+            )
         return
     quota_ids = [uuid.UUID(str(q)) for q in action["quota_ids"]]
     result = await db.execute(select(Quota.id).where(Quota.id.in_(quota_ids)))
@@ -339,59 +361,125 @@ def apply_rewrite_to_request(
     pattern: str,
     replacement: str,
 ) -> MessagesRequest:
+    """Apply a regex rewrite to every piece of text a content condition can match: message
+    text, tool results, documents, search results, tool-call arguments and the system
+    prompt. Thinking blocks are left alone, since providers verify their signatures."""
     compiled = re.compile(pattern)
-    updated_messages = []
-    for msg in request.messages:
-        if isinstance(msg.content, str):
-            new_content = compiled.sub(replacement, msg.content)
-            updated_messages.append(msg.model_copy(update={"content": new_content}))
-        elif isinstance(msg.content, list):
-            new_blocks = []
-            for block in msg.content:
-                if hasattr(block, "text"):
-                    new_text = compiled.sub(replacement, block.text)
-                    new_blocks.append(block.model_copy(update={"text": new_text}))
-                else:
-                    new_blocks.append(block)
-            updated_messages.append(msg.model_copy(update={"content": new_blocks}))
-        else:
-            updated_messages.append(msg)
 
-    updates: dict[str, Any] = {"messages": updated_messages}
+    def sub(text: str) -> str:
+        return compiled.sub(replacement, text)
+
+    updates: dict[str, Any] = {
+        "messages": [
+            msg.model_copy(update={"content": _map_content(msg.content, sub, include_signed=False)})
+            for msg in request.messages
+        ]
+    }
     if request.system:
-        if isinstance(request.system, str):
-            updates["system"] = compiled.sub(replacement, request.system)
-        elif isinstance(request.system, list):
-            new_sys = []
-            for block in request.system:
-                if hasattr(block, "text"):
-                    new_sys.append(block.model_copy(update={"text": compiled.sub(replacement, block.text)}))
-                else:
-                    new_sys.append(block)
-            updates["system"] = new_sys
-
+        updates["system"] = _map_content(request.system, sub, include_signed=False)
     return request.model_copy(update=updates)
 
 
+# --- Text walking ---
+#
+# One walker serves both rule matching (collect every piece of text) and rewrites (replace
+# every piece of text), so a rewrite always reaches exactly what a content rule can see.
+# Text that the walker skipped would be a way around content rules and redaction.
+
+_TEXT_MEDIA_TYPES = {"application/json", "application/xml", "application/x-yaml", "application/yaml"}
+
+
+def _is_text_media(media_type: str | None) -> bool:
+    media_type = (media_type or "").lower()
+    return media_type.startswith("text/") or media_type in _TEXT_MEDIA_TYPES
+
+
+def _map_strings(value: Any, fn: Callable[[str], str]) -> Any:
+    """Apply ``fn`` to every string inside a JSON-like value (tool-call arguments)."""
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, dict):
+        return {k: _map_strings(v, fn) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_map_strings(v, fn) for v in value]
+    return value
+
+
+def _map_base64_text(source: DocumentSource, fn: Callable[[str], str]) -> DocumentSource:
+    if not _is_text_media(source.media_type):
+        return source
+    try:
+        text = base64.b64decode(source.data, validate=False).decode("utf-8")
+    except (binascii.Error, ValueError):
+        return source
+    new_text = fn(text)
+    if new_text == text:
+        return source
+    return source.model_copy(update={"data": base64.b64encode(new_text.encode("utf-8")).decode("ascii")})
+
+
+def _map_document_source(source: Any, fn: Callable[[str], str]) -> Any:
+    if isinstance(source, PlainTextSource):
+        return source.model_copy(update={"data": fn(source.data)})
+    if isinstance(source, ContentSource):
+        return source.model_copy(update={"content": _map_content(source.content, fn)})
+    if isinstance(source, DocumentSource):
+        return _map_base64_text(source, fn)
+    return source
+
+
+def _map_block(block: Any, fn: Callable[[str], str], include_signed: bool) -> Any:
+    if isinstance(block, TextBlock):
+        return block.model_copy(update={"text": fn(block.text)})
+    if isinstance(block, ToolResultBlock):
+        return block.model_copy(update={"content": _map_content(block.content, fn, include_signed)})
+    if isinstance(block, DocumentBlock):
+        update: dict[str, Any] = {"source": _map_document_source(block.source, fn)}
+        if block.title is not None:
+            update["title"] = fn(block.title)
+        if block.context is not None:
+            update["context"] = fn(block.context)
+        return block.model_copy(update=update)
+    if isinstance(block, SearchResultBlock):
+        return block.model_copy(
+            update={"title": fn(block.title), "content": _map_content(block.content, fn, include_signed)}
+        )
+    if isinstance(block, ToolUseBlock):
+        return block.model_copy(update={"input": _map_strings(block.input, fn)})
+    if isinstance(block, ThinkingBlock) and include_signed:
+        fn(block.thinking)  # matched against, but never rewritten (it's signed)
+        return block
+    return block
+
+
+def _map_content(content: Any, fn: Callable[[str], str], include_signed: bool = True) -> Any:
+    """Apply ``fn`` to every piece of text in a message's (or system prompt's) content."""
+    if isinstance(content, str):
+        return fn(content)
+    if isinstance(content, list):
+        return [_map_block(block, fn, include_signed) for block in content]
+    return content
+
+
+def _collect_text(content: Any) -> list[str]:
+    parts: list[str] = []
+
+    def collect(text: str) -> str:
+        parts.append(text)
+        return text
+
+    _map_content(content, collect)
+    return parts
+
+
 def _extract_messages_text(request: MessagesRequest) -> str:
-    parts = []
+    parts: list[str] = []
     for msg in request.messages:
-        if isinstance(msg.content, str):
-            parts.append(msg.content)
-        elif isinstance(msg.content, list):
-            for block in msg.content:
-                if hasattr(block, "text"):
-                    parts.append(block.text)
+        parts.extend(_collect_text(msg.content))
     return "\n".join(parts)
 
 
 def _extract_system_text(request: MessagesRequest) -> str:
     if request.system is None:
         return ""
-    if isinstance(request.system, str):
-        return request.system
-    parts = []
-    for block in request.system:
-        if hasattr(block, "text"):
-            parts.append(block.text)
-    return "\n".join(parts)
+    return "\n".join(_collect_text(request.system))

@@ -23,6 +23,7 @@ from ttllm.core.rules import (
     evaluate_group,
     collect_quota_ids,
     references_groups,
+    references_resolved_model,
     render_template,
 )
 from ttllm.schemas.anthropic import Message, MessagesRequest
@@ -655,21 +656,13 @@ class TestRuleDefinitionValidation:
         with pytest.raises(ValueError):
             RuleCreate(name="r", conditions=self.GROUP, action={"type": "apply_quota", "quota_ids": ["nope"]})
 
-    def test_resolved_model_rejected_on_terminal_rules(self):
-        """It's None during terminal evaluation, and a negated condition would then match."""
+    def test_resolved_model_allowed_on_terminal_rules(self):
+        """Terminal rules now see the pre-resolved model, so aliases can't get around them."""
         conditions = {
-            "logic": "or",
-            "conditions": [
-                {
-                    "logic": "and",
-                    "conditions": [
-                        {"type": "parameter", "field": "resolved_model", "value": "m", "negate": True},
-                    ],
-                }
-            ],
+            "logic": "and",
+            "conditions": [{"type": "parameter", "field": "resolved_model", "value": "m"}],
         }
-        with pytest.raises(ValueError, match="resolved_model"):
-            validate_rule_definition(conditions, {"type": "block"})
+        validate_rule_definition(conditions, {"type": "block"})
         validate_rule_definition(conditions, {"type": "apply_quota", "quota_ids": [str(uuid.uuid4())]})
 
     def test_legacy_quota_rule_cannot_pass_definition_check(self):
@@ -677,3 +670,99 @@ class TestRuleDefinitionValidation:
         legacy = {"logic": "and", "conditions": [{"type": "quota", "field": "cost", "value": 5, "window": 60}]}
         with pytest.raises(ValueError):
             validate_rule_definition(legacy, {"type": "block"})
+
+
+# --- Content walking: rules see (and rewrite) text in every block type ---
+
+
+import base64 as _b64
+
+from ttllm.schemas.anthropic import (
+    DocumentBlock,
+    PlainTextSource,
+    SearchResultBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
+from ttllm.services.rules_service import _extract_messages_text
+
+SECRET = "SECRET-123-45-6789"
+
+
+def _req(*blocks, system=None) -> MessagesRequest:
+    return MessagesRequest(
+        model="m", max_tokens=10, messages=[Message(role="user", content=list(blocks))], system=system
+    )
+
+
+def _b64_doc(text: str, media_type: str = "text/plain") -> DocumentBlock:
+    return DocumentBlock(
+        source={"type": "base64", "media_type": media_type, "data": _b64.b64encode(text.encode()).decode()}
+    )
+
+
+HIDING_PLACES = {
+    "tool_result_str": lambda: ToolResultBlock(tool_use_id="t", content=SECRET),
+    "tool_result_list": lambda: ToolResultBlock(tool_use_id="t", content=[TextBlock(text=SECRET)]),
+    "plain_text_document": lambda: DocumentBlock(source=PlainTextSource(data=SECRET)),
+    "content_document": lambda: DocumentBlock(source={"type": "content", "content": [{"type": "text", "text": SECRET}]}),
+    "base64_text_document": lambda: _b64_doc(SECRET),
+    "document_context": lambda: DocumentBlock(source=PlainTextSource(data="x"), context=SECRET),
+    "search_result": lambda: SearchResultBlock(source="s", title="t", content=[TextBlock(text=SECRET)]),
+    "tool_use_input": lambda: ToolUseBlock(id="t", name="n", input={"q": {"nested": [SECRET]}}),
+    "tool_result_nested_document": lambda: ToolResultBlock(
+        tool_use_id="t", content=[DocumentBlock(source=PlainTextSource(data=SECRET))]
+    ),
+}
+
+
+class TestContentWalking:
+    @pytest.mark.parametrize("place", sorted(HIDING_PLACES))
+    def test_content_rule_sees_text(self, place):
+        assert SECRET in _extract_messages_text(_req(HIDING_PLACES[place]()))
+
+    @pytest.mark.parametrize("place", sorted(HIDING_PLACES))
+    def test_rewrite_reaches_text(self, place):
+        request = _req(HIDING_PLACES[place]())
+        result = apply_rewrite_to_request(request, r"\d{3}-\d{2}-\d{4}", "[REDACTED]")
+        assert "123-45-6789" not in _extract_messages_text(result)
+        assert "[REDACTED]" in _extract_messages_text(result)
+
+    def test_thinking_is_matched_but_never_rewritten(self):
+        request = _req(ThinkingBlock(thinking=SECRET, signature="sig"))
+        assert SECRET in _extract_messages_text(request)
+        result = apply_rewrite_to_request(request, r"\d{3}-\d{2}-\d{4}", "[REDACTED]")
+        assert result.messages[0].content[0].thinking == SECRET
+
+    def test_binary_base64_document_is_untouched(self):
+        block = DocumentBlock(source={"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQ="})
+        result = apply_rewrite_to_request(_req(block), r"V", "X")
+        assert result.messages[0].content[0].source.data == "JVBERi0xLjQ="
+
+    def test_count_tokens_function_counts_hidden_text(self):
+        ctx = build_request_context(_req(ToolResultBlock(tool_use_id="t", content="x" * 4000)), headers={}, user_id="u")
+        cond = Condition(type=ConditionType.FUNCTION, field="count_tokens", operator=MatchOp.GTE, value=1000)
+        assert evaluate_condition(cond, ctx)
+
+
+class TestReferencesResolvedModel:
+    def _cond(self):
+        return ConditionGroup(
+            logic=LogicOp.AND,
+            conditions=(Condition(type=ConditionType.PARAMETER, field="resolved_model", operator=MatchOp.EXACT, value="opus"),),
+        )
+
+    def test_terminal_rule_references_it(self):
+        assert references_resolved_model([_rule(conditions=self._cond(), action=Action(type=ActionType.BLOCK))])
+
+    def test_apply_quota_and_disabled_rules_dont_count(self):
+        quota = _rule(conditions=self._cond(), action=Action(type=ActionType.APPLY_QUOTA, quota_ids=("q",)))
+        disabled = _rule(conditions=self._cond(), action=Action(type=ActionType.BLOCK), enabled=False)
+        assert not references_resolved_model([quota, disabled])
+
+    def test_block_rule_on_resolved_model_catches_an_alias(self):
+        rule = _rule(conditions=self._cond(), action=Action(type=ActionType.BLOCK, target="no opus"))
+        ctx = _ctx(model="opus-alias-matching-pattern", resolved_model="opus")
+        assert evaluate_rules([rule], ctx).action_type == ActionType.BLOCK

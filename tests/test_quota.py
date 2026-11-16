@@ -30,7 +30,7 @@ from ttllm.core.quota import (
     seconds_until,
 )
 from ttllm.schemas.admin import QuotaDefinition
-from ttllm.services.quota_service import _strip_base64
+from ttllm.services.quota_service import _strip_base64, build_estimate
 
 UTC = timezone.utc
 
@@ -188,6 +188,55 @@ class TestEstimates:
         block = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 1000}}
         assert "data" not in _strip_base64({"content": [block]})["content"][0]["source"]
 
+    def test_negative_max_tokens_never_reserves_negative(self):
+        est = RequestEstimate(
+            input_chars=400, max_tokens=-1_000_000, input_cost_per_1k=Decimal("0.003"), output_cost_per_1k=Decimal("0.015")
+        )
+        assert estimate_amount(Measure.TOKENS, est) == 100
+        assert estimate_amount(Measure.COST, est) >= 0
+
+
+class TestBase64Estimates:
+    MODEL = type("M", (), {"input_cost_per_1k": Decimal("0.003"), "output_cost_per_1k": Decimal("0.015")})()
+
+    @staticmethod
+    def _request(source: dict):
+        from ttllm.schemas.anthropic import MessagesRequest
+
+        return MessagesRequest(
+            model="m",
+            max_tokens=1,
+            messages=[{"role": "user", "content": [{"type": "document", "source": source}]}],
+        )
+
+    def _chars(self, media_type: str, data: str) -> int:
+        return build_estimate(self._request({"type": "base64", "media_type": media_type, "data": data}), self.MODEL).input_chars
+
+    def test_base64_text_document_counts_its_decoded_size(self):
+        """A large base64 text document used to reserve almost nothing."""
+        data = "QUFB" * 100_000  # 300k decoded bytes
+        assert self._chars("text/plain", data) >= 300_000
+
+    def test_binary_document_counts_a_fraction_of_its_size(self):
+        data = "QUFB" * 100_000
+        chars = self._chars("application/pdf", data)
+        assert 100_000 <= chars < 300_000
+
+    def test_image_counts_a_fixed_amount(self):
+        small = build_estimate(self._image("QUFB"), self.MODEL).input_chars
+        large = build_estimate(self._image("QUFB" * 100_000), self.MODEL).input_chars
+        assert small == large
+        assert small >= 1600 * 4
+
+    def _image(self, data: str):
+        from ttllm.schemas.anthropic import MessagesRequest
+
+        return MessagesRequest(
+            model="m",
+            max_tokens=1,
+            messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}]}],
+        )
+
 
 class TestActualAmount:
     def test_success_charges_actuals(self):
@@ -222,6 +271,12 @@ class TestActualAmount:
 
 
 class TestAdmission:
+    def test_negative_in_flight_cannot_reopen_an_exhausted_bucket(self):
+        """Even if a negative amount slipped through, the request's own estimate is clamped."""
+        est = estimate_amount(Measure.TOKENS, RequestEstimate(input_chars=0, max_tokens=-10**9))
+        assert est == 0
+        assert not admits("soft", Decimal(100), Decimal(0), est, Decimal(100))
+
     LIMIT = Decimal(10)
 
     def test_soft_admits_while_anything_is_left(self):

@@ -7,7 +7,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from ttllm.api.deps import AuthContext, DB, get_authenticated
+from ttllm.api.deps import AuthContext, DB, get_authenticated, get_session_authenticated
 from ttllm.schemas.admin import CostBreakdownItem, QuotaBucketResponse, UsageSummaryResponse, WhoamiResponse
 from ttllm.schemas.auth import TokenCreatedResponse, TokenResponse
 from ttllm.schemas.me import AvailableModelResponse, SelfTokenCreate
@@ -52,7 +52,7 @@ async def list_my_models(
 @router.get("/me/tokens", response_model=list[TokenResponse])
 async def list_my_tokens(
     db: DB,
-    ctx: AuthContext = Depends(get_authenticated),
+    ctx: AuthContext = Depends(get_session_authenticated),
 ):
     """List the authenticated user's own tokens."""
     tokens = await auth_service.list_tokens(db, user_id=ctx.user.id)
@@ -68,7 +68,7 @@ async def list_my_tokens(
 async def create_my_token(
     body: SelfTokenCreate,
     db: DB,
-    ctx: AuthContext = Depends(get_authenticated),
+    ctx: AuthContext = Depends(get_session_authenticated),
 ):
     """Create a token for the authenticated user, scoped to their own permissions."""
     try:
@@ -87,7 +87,7 @@ async def create_my_token(
 async def revoke_my_token(
     token_id: uuid.UUID,
     db: DB,
-    ctx: AuthContext = Depends(get_authenticated),
+    ctx: AuthContext = Depends(get_session_authenticated),
 ):
     """Revoke one of the authenticated user's own tokens."""
     token = await auth_service.get_token(db, token_id)

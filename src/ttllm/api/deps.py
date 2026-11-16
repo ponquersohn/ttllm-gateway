@@ -91,6 +91,33 @@ async def get_authenticated(
     return await _authenticate(authorization[7:], db)
 
 
+async def is_api_token(db: AsyncSession, ctx: AuthContext) -> bool:
+    """Whether the caller authenticated with a registered API token rather than a login
+    session (login-issued JWTs have no ``gateway_tokens`` row)."""
+    return await auth_service.token_exists(db, ctx.jti)
+
+
+async def get_session_authenticated(
+    ctx: AuthContext = Depends(get_authenticated),
+    db: AsyncSession = Depends(get_db),
+) -> AuthContext:
+    """Like ``get_authenticated``, but only for interactive login sessions.
+
+    For actions that mint or hand out credentials (creating tokens, approving device
+    logins): an API token, especially a leaked ``llm.invoke`` key, must not be able to
+    turn itself into a broader or longer-lived credential.
+    """
+    if await is_api_token(db, ctx):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "type": "permission_error",
+                "message": "This action requires a login session, not an API token",
+            },
+        )
+    return ctx
+
+
 def require_permission(*perms: str, auth_dep=get_authenticated):
     """Dependency factory: returns a dependency that checks the caller has all listed permissions."""
     async def checker(

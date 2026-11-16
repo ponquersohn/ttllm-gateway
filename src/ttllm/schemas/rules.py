@@ -135,10 +135,3 @@ def validate_rule_definition(conditions: dict, action: dict) -> None:
     """
     validate_condition_group_dict(conditions)
     validate_action_dict(action)
-    if action.get("type") != "apply_quota":
-        for cond in iter_condition_dicts(conditions):
-            if cond.get("type") == "parameter" and cond.get("field") == "resolved_model":
-                raise ValueError(
-                    "resolved_model is only known once the model is resolved, "
-                    "so it can only be used on apply_quota rules"
-                )

@@ -195,3 +195,25 @@ class TestLangChainProviderStream:
         assert any(c.kind.value == "message_stop" for c in collected)
         assert state.get_response().content[0].text == "Hi there"
         assert state.latency_ms >= 0
+
+
+class TestBedrockCachePriceFallback:
+    """Unset (None) cache prices bill at the input rate; an explicit price, even 0, is kept."""
+
+    def _state(self, **prices) -> BedrockState:
+        state = BedrockState(_make_model(**prices), uuid.uuid4())
+        state.cache_read_tokens = 1000
+        state.cache_write_tokens = 2000
+        return state
+
+    def test_unset_prices_bill_at_input_rate(self):
+        state = self._state(cache_read_cost_per_1k=None, cache_write_cost_per_1k=None)
+        assert state.get_cost() == Decimal("0.003") * 3
+
+    def test_explicit_prices_are_used(self):
+        state = self._state()
+        assert state.get_cost() == Decimal("0.0003") + Decimal("0.00375") * 2
+
+    def test_explicit_zero_is_respected(self):
+        state = self._state(cache_read_cost_per_1k=Decimal("0"), cache_write_cost_per_1k=Decimal("0"))
+        assert state.get_cost() == 0

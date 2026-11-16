@@ -340,9 +340,9 @@ def _thinking_to_internal(thinking: dict[str, Any] | None) -> ThinkingConfig | N
     if thinking_type == "adaptive":
         return ThinkingConfig(enabled=True, type="adaptive")
     budget_tokens = thinking.get("budget_tokens")
-    if not isinstance(budget_tokens, int):
+    if not isinstance(budget_tokens, int) or isinstance(budget_tokens, bool) or budget_tokens < 1:
         raise UnsupportedContentError(
-            "thinking.budget_tokens is required and must be an integer when thinking.type is 'enabled'"
+            "thinking.budget_tokens is required and must be a positive integer when thinking.type is 'enabled'"
         )
     return ThinkingConfig(enabled=True, type="enabled", budget_tokens=budget_tokens)
 

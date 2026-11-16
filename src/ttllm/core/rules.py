@@ -303,6 +303,17 @@ def references_groups(rules: list[Rule]) -> bool:
     )
 
 
+def references_resolved_model(rules: list[Rule]) -> bool:
+    """Whether any terminal rule matches on ``resolved_model``, so the requested model must
+    be resolved before terminal rules run. (``apply_quota`` rules always get it.)"""
+    return any(
+        cond.type == ConditionType.PARAMETER and cond.field == "resolved_model"
+        for rule in rules
+        if rule.enabled and rule.action.type != ActionType.APPLY_QUOTA
+        for cond in iter_conditions(rule.conditions)
+    )
+
+
 def iter_conditions(group: ConditionGroup):
     """Yield every leaf Condition in a (possibly nested) ConditionGroup."""
     for cond in group.conditions:

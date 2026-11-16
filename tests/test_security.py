@@ -617,3 +617,46 @@ class TestInactiveUserLogin:
         create_tokens.assert_not_called()
         assert isinstance(exc, HTTPException)
         assert exc.status_code == 403
+
+
+class TestSessionOnlyEndpoints:
+    """Minting credentials needs a login session: a registered API token (e.g. a leaked
+    llm.invoke key) must not be able to widen or outlive itself."""
+
+    def _ctx(self):
+        from ttllm.api.deps import AuthContext
+
+        return AuthContext(user=MagicMock(), token_permissions={"llm.invoke"}, current_permissions={"llm.invoke"}, jti=uuid.uuid4())
+
+    async def test_api_token_rejected(self):
+        from fastapi import HTTPException
+
+        from ttllm.api.deps import get_session_authenticated
+
+        with patch("ttllm.api.deps.auth_service.token_exists", AsyncMock(return_value=True)):
+            with pytest.raises(HTTPException) as exc:
+                await get_session_authenticated(self._ctx(), MagicMock())
+        assert exc.value.status_code == 403
+
+    async def test_login_session_allowed(self):
+        from ttllm.api.deps import get_session_authenticated
+
+        ctx = self._ctx()
+        with patch("ttllm.api.deps.auth_service.token_exists", AsyncMock(return_value=False)):
+            assert await get_session_authenticated(ctx, MagicMock()) is ctx
+
+    def test_token_endpoints_use_session_dependency(self):
+        from ttllm.api.auth import router as auth_router
+        from ttllm.api.deps import get_session_authenticated
+        from ttllm.api.me import router as me_router
+
+        paths = {("/me/tokens", "GET"), ("/me/tokens", "POST"), ("/me/tokens/{token_id}", "DELETE"),
+                 ("/auth/device/approve", "POST"), ("/auth/device/lookup", "GET")}
+        found = set()
+        for route in [*me_router.routes, *auth_router.routes]:
+            for method in getattr(route, "methods", ()):
+                if (route.path, method) in paths:
+                    deps = {d.call for d in route.dependant.dependencies}
+                    assert get_session_authenticated in deps, (route.path, method)
+                    found.add((route.path, method))
+        assert found == paths
