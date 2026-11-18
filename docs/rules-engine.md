@@ -114,9 +114,9 @@ A condition is a single predicate:
 
 | Type | `field` values | Matches against |
 |---|---|---|
-| `parameter` | `model`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stream`, or `resolved_model` (`apply_quota` rules only) | Request parameters |
+| `parameter` | `model`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stream`, or `resolved_model` | Request parameters |
 | `header` | any HTTP header name (case-insensitive) | Request headers |
-| `content` | `messages` or `system` | The concatenated message text or system prompt |
+| `content` | `messages` or `system` | The concatenated message text or system prompt: text blocks, tool results, documents (plain-text, content and base64 text sources, plus title/context), search results, tool-call arguments and thinking |
 | `function` | `count_tokens`, `message_length`, `keyword_count` | A computed value (see below) |
 | `subject` | `user_id`, `user_email`, `token_id`, `group` | The authenticated caller. `group` matches if any of the caller's groups match |
 
@@ -125,9 +125,14 @@ Every condition supports `"negate": true` to invert the result.
 `subject` conditions come from authentication, so unlike `header` and `content`
 conditions, clients can't influence them. Use them for anything security-relevant.
 
-`resolved_model` is the model actually serving the request, which can differ from
-`model` when a rule reroutes or a `match_pattern` matches. It's only known after
-resolution, so only `apply_quota` rules can use it.
+`resolved_model` is the model the request's name resolves to, which can differ from
+`model` (the name the client sent) when a `match_pattern` matches. Any name a pattern
+accepts reaches the same model, so match on `resolved_model` for anything
+security-relevant: a `block` rule on `model` can be sidestepped by sending an alias, and
+creating one logs a warning. Terminal rules see the requested name's resolution (`null`
+when the caller can't access that model); `apply_quota` rules see the model that will
+actually serve the request, after any reroute. It's only looked up when an enabled rule
+uses it.
 
 ### Built-in functions
 
@@ -180,7 +185,7 @@ Conditions are wrapped in a group with a logic operator, and groups can nest:
 | `reroute` | `target` | Replace the requested model name with `target` before resolution |
 | `block` | `message`, `status_code` | Reject the request. `status_code` defaults to `403`. `message` supports [templating](#block-message-templating) |
 | `allow` | — | Pass through unchanged; pre-empts lower-weight rules |
-| `rewrite` | `pattern`, `replacement` | Regex-replace within message and system text |
+| `rewrite` | `pattern`, `replacement` | Regex-replace within message and system text — everywhere a `content` condition matches, except thinking blocks (providers verify their signatures) |
 | `apply_quota` | `quota_ids` | Attach [quotas](quotas.md). Not a terminal action: all matching rules apply |
 
 `block.status_code` must be a valid HTTP error status (400–599). `rewrite.pattern`

@@ -169,13 +169,17 @@ def estimate_amount(measure: Measure | str, estimate: RequestEstimate) -> Decima
     """Upper-ish estimate of what a request will consume, reserved until it settles."""
     if measure == Measure.REQUESTS:
         return Decimal(1)
-    input_tokens = estimate.input_chars // _CHARS_PER_TOKEN
+    # Never negative: a negative reservation would lower in-flight usage for every other
+    # request against the bucket and let an exhausted quota admit them.
+    input_tokens = max(estimate.input_chars, 0) // _CHARS_PER_TOKEN
+    max_tokens = max(estimate.max_tokens, 0)
     if measure == Measure.TOKENS:
-        return Decimal(input_tokens + estimate.max_tokens)
+        return Decimal(input_tokens + max_tokens)
     if measure == Measure.COST:
-        return (
-            Decimal(input_tokens) * estimate.input_cost_per_1k + Decimal(estimate.max_tokens) * estimate.output_cost_per_1k
+        amount = (
+            Decimal(input_tokens) * estimate.input_cost_per_1k + Decimal(max_tokens) * estimate.output_cost_per_1k
         ) / 1000
+        return max(amount, Decimal(0))
     raise ValueError(f"unknown quota measure: {measure}")
 
 

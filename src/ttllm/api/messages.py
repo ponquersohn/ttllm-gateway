@@ -32,7 +32,7 @@ from ttllm.core.quota import (
     denial_status,
     format_amount,
 )
-from ttllm.core.rules import ActionType, collect_quota_ids
+from ttllm.core.rules import ActionType, collect_quota_ids, references_resolved_model
 from ttllm.db import async_session_factory
 from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse
 from ttllm.services import audit_service, model_service, quota_service, rules_service, secret_service, user_service
@@ -203,11 +203,13 @@ class _Routing:
         return {"requested_model": self.requested_model, "hops": list(self.hops)}
 
 
-def _apply_terminal_rules(active_rules, build_context, body: MessagesRequest, routing: _Routing) -> MessagesRequest:
+def _apply_terminal_rules(
+    active_rules, build_context, body: MessagesRequest, routing: _Routing, resolved_model: str | None = None
+) -> MessagesRequest:
     """First match by weight decides block/reroute/rewrite/allow."""
     if not active_rules:
         return body
-    outcome = rules_service.evaluate_rules(active_rules, build_context(body))
+    outcome = rules_service.evaluate_rules(active_rules, build_context(body, resolved_model))
     if not outcome:
         return body
     if outcome.action_type == ActionType.BLOCK:
@@ -247,8 +249,16 @@ async def _route_request(
     routing = _Routing(body.model)
     original = body
     quota_rerouted = False
+    needs_resolved_model = references_resolved_model(active_rules)
     while True:
-        current = _apply_terminal_rules(active_rules, build_context, body, routing)
+        # Terminal rules on ``resolved_model`` see the model this name actually resolves to,
+        # so sending an alias that matches a model's match_pattern can't get around them.
+        # Only looked up when some rule needs it. None when the caller can't access it.
+        pre_resolved = None
+        if needs_resolved_model:
+            pre_model = await model_service.get_model_for_user(db, ctx.user.id, body.model)
+            pre_resolved = pre_model.name if pre_model else None
+        current = _apply_terminal_rules(active_rules, build_context, body, routing, pre_resolved)
         if routing.hops:
             metadata["routing"] = routing.as_metadata()
 

@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 
 from ttllm import __version__
-from ttllm.api.deps import AuthContext, DB, get_authenticated, require_permission
+from ttllm.api.deps import AuthContext, DB, get_authenticated, is_api_token, require_permission
 from ttllm.config import settings
 from ttllm.core.permissions import Permissions
 from ttllm.core.secrets import validate_fernet_key
@@ -678,6 +678,20 @@ async def create_token(
     ctx: AuthContext = Depends(require_permission(Permissions.TOKEN_CREATE)),
 ):
     target_user_id = body.user_id or ctx.user.id
+    if await is_api_token(db, ctx):
+        # An API token may only mint tokens no broader than itself, so a narrow management
+        # token can't widen into everything its owner holds.
+        requested = set(body.permissions or [Permissions.LLM_INVOKE])
+        excess = requested - ctx.permissions
+        if excess:
+            raise HTTPException(
+                403,
+                detail={
+                    "type": "permission_error",
+                    "message": "An API token can't create a token with permissions it doesn't hold: "
+                    + ", ".join(sorted(excess)),
+                },
+            )
     try:
         result = await auth_service.create_token(
             db, target_user_id, label=body.label, ttl_days=body.ttl_days, permissions=body.permissions,

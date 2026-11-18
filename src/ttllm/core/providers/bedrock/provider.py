@@ -22,6 +22,13 @@ def _cost(tokens: int, rate: Any) -> Decimal:
     return (Decimal(tokens) / 1000) * Decimal(str(rate or 0))
 
 
+def _cache_rate(model: Any, attr: str) -> Any:
+    """A cache price, or the input price when it isn't set. Billing unpriced cache
+    tokens at 0 would let a client push a whole prompt past cost quotas by caching it."""
+    rate = getattr(model, attr, None)
+    return model.input_cost_per_1k if rate is None else rate
+
+
 class BedrockState(ProviderState):
     """Per-request accumulator for a Bedrock Converse exchange."""
 
@@ -49,8 +56,8 @@ class BedrockState(ProviderState):
         return {
             "input": _cost(self.input_tokens, m.input_cost_per_1k),
             "output": _cost(self.output_tokens, m.output_cost_per_1k),
-            "cache_read": _cost(self.cache_read_tokens, getattr(m, "cache_read_cost_per_1k", 0)),
-            "cache_write": _cost(self.cache_write_tokens, getattr(m, "cache_write_cost_per_1k", 0)),
+            "cache_read": _cost(self.cache_read_tokens, _cache_rate(m, "cache_read_cost_per_1k")),
+            "cache_write": _cost(self.cache_write_tokens, _cache_rate(m, "cache_write_cost_per_1k")),
         }
 
     def get_cost(self) -> Decimal:

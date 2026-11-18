@@ -388,3 +388,24 @@ class TestDocumentEmulation:
     def test_binary_pdf_still_errors(self):
         with pytest.raises(UnsupportedContentError):
             self._user(DocumentPart(media_type="application/pdf", data="aWdub3Jl"))
+
+
+class TestMaxTokensValidation:
+    """Quota reservations are estimated from max_tokens, so it must be positive."""
+
+    @pytest.mark.parametrize("max_tokens", [0, -1, -1_000_000])
+    def test_non_positive_rejected(self, max_tokens):
+        from pydantic import ValidationError
+
+        from ttllm.schemas.anthropic import MessagesRequest
+
+        with pytest.raises(ValidationError):
+            MessagesRequest(model="m", max_tokens=max_tokens, messages=[{"role": "user", "content": "hi"}])
+
+    @pytest.mark.parametrize("budget", [0, -5, True])
+    def test_non_positive_thinking_budget_rejected(self, budget):
+        from ttllm.core.adapters.anthropic import _thinking_to_internal
+        from ttllm.core.errors import UnsupportedContentError
+
+        with pytest.raises(UnsupportedContentError):
+            _thinking_to_internal({"type": "enabled", "budget_tokens": budget})

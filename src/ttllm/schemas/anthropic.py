@@ -304,7 +304,9 @@ class MessagesRequest(BaseModel):
 
     model: str
     messages: list[Message]
-    max_tokens: int
+    # Must be positive: quota reservations are estimated from it, so a negative value
+    # would reserve a negative amount and let exhausted buckets admit requests.
+    max_tokens: int = Field(ge=1)
     system: str | list[TextBlock] | None = None
     temperature: float | None = None
     top_p: float | None = None

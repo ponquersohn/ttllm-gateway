@@ -111,6 +111,9 @@ per-member limit within a group, use `["user"]` with the same condition.
 
 Tokens and cost aren't known until a response finishes, so each request reserves an estimate:
 the request's size divided by 4, plus `max_tokens`, priced at the model's rates when measuring cost.
+Base64 payloads are estimated by kind rather than by encoded length: text media types count their
+decoded size, images a fixed ~1600 tokens, and other binary documents (PDF, …) a fraction of their
+decoded size. `max_tokens` must be at least 1, and an estimate is never negative.
 
 - **`soft`** admits a request while `used + in_flight < limit`. Large `max_tokens` values aren't
   rejected just because little budget is left, and a limit can be overshot by about one request.

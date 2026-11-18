@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from ttllm.api.deps import AuthContext, DB, get_authenticated
+from ttllm.api.deps import AuthContext, DB, get_authenticated, get_session_authenticated
 from ttllm.config import settings
 from ttllm.core import oidc
 from ttllm.core.device_flow import PollOutcome
@@ -170,26 +170,13 @@ async def device_token(body: DeviceTokenRequest, db: DB):
     return await auth_service.create_management_tokens(db, user)
 
 
-async def _require_session(ctx: AuthContext, db) -> None:
-    """Device approval needs an interactive login session, not a gateway API token."""
-    if await auth_service.token_exists(db, ctx.jti):
-        raise HTTPException(
-            403,
-            detail={
-                "type": "permission_error",
-                "message": "Device logins must be approved from a login session, not an API token",
-            },
-        )
-
-
 @router.get("/device/lookup", response_model=DeviceLookupResponse)
 async def device_lookup(
     user_code: str,
     db: DB,
-    ctx: AuthContext = Depends(get_authenticated),
+    ctx: AuthContext = Depends(get_session_authenticated),
 ):
     """Describe a pending device login so the user can confirm it before approving."""
-    await _require_session(ctx, db)
     row = await device_auth_service.get_pending_by_user_code(db, user_code)
     if row is None:
         raise _device_not_found()
@@ -208,10 +195,9 @@ async def device_lookup(
 async def device_approve(
     body: DeviceApproveRequest,
     db: DB,
-    ctx: AuthContext = Depends(get_authenticated),
+    ctx: AuthContext = Depends(get_session_authenticated),
 ):
     """Approve (or deny) a pending device login as the authenticated user."""
-    await _require_session(ctx, db)
     if not await device_auth_service.resolve(db, body.user_code, ctx.user, body.approve):
         raise _device_not_found()
     await db.commit()

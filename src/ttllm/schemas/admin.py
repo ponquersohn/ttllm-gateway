@@ -95,8 +95,9 @@ class ModelCreate(BaseModel):
     config_json: dict[str, Any] = {}
     input_cost_per_1k: Decimal = Decimal("0")
     output_cost_per_1k: Decimal = Decimal("0")
-    cache_read_cost_per_1k: Decimal = Decimal("0")
-    cache_write_cost_per_1k: Decimal = Decimal("0")
+    # None = bill cache tokens at the input rate.
+    cache_read_cost_per_1k: Decimal | None = None
+    cache_write_cost_per_1k: Decimal | None = None
     match_pattern: str | None = None
 
     @field_validator("match_pattern")
@@ -117,6 +118,8 @@ class ModelUpdate(BaseModel):
     merge_config: bool = False
     input_cost_per_1k: Decimal | None = None
     output_cost_per_1k: Decimal | None = None
+    # For these two, an explicit null resets the price to "bill at the input rate";
+    # leaving the field out keeps it unchanged.
     cache_read_cost_per_1k: Decimal | None = None
     cache_write_cost_per_1k: Decimal | None = None
     is_active: bool | None = None
@@ -137,8 +140,8 @@ class ModelResponse(BaseModel):
     config_json: dict[str, Any]
     input_cost_per_1k: Decimal
     output_cost_per_1k: Decimal
-    cache_read_cost_per_1k: Decimal
-    cache_write_cost_per_1k: Decimal
+    cache_read_cost_per_1k: Decimal | None = None
+    cache_write_cost_per_1k: Decimal | None = None
     match_pattern: str | None = None
     is_active: bool
     created_at: datetime
