@@ -336,7 +336,11 @@ ttllm quotas list|show|create|update|delete
 ttllm quotas buckets <name>     # current usage per bucket
 ttllm quotas reset <name>       # discard all usage
 ttllm me quotas                 # your own standing
+ttllm quotas overrides issue --duration 4h --code-ttl 1d --reason "..."   # single-use quota override code
+ttllm quotas overrides list|revoke
 ```
+
+A user with the `quota.override` permission can issue a **quota override code**. Whoever enters it in the web UI's Quota tab (the issuer included) is exempt from every quota until the override expires. Each code works once, has a redeem deadline and an override duration, and needs a reason, which is audited. See [Quota overrides](docs/quotas.md#quota-overrides).
 
 Upgrading from the old rolling-window `quota` condition: those rules are disabled by migration 020 and **their limits aren't enforced until recreated**. See the [upgrade notes](docs/quotas.md#upgrading-from-rolling-window-quota-rules).
 
@@ -517,6 +521,7 @@ ttllm me models                      # List models available to you
 ttllm me tokens                      # List your active tokens
 ttllm me tokens create               # Create a token for yourself
 ttllm me tokens delete <id>          # Revoke one of your tokens
+ttllm run claude [claude args...]    # Run Claude Code via the gateway with a temporary token
 ttllm users list|show|create|update|delete
 ttllm users deactivate|activate <user> # Block/unblock a user (all tokens rejected, login refused)
 ttllm models list|show|create|update|delete|assign|unassign
@@ -535,6 +540,24 @@ Every command accepts `--json` for machine-readable output instead of formatted 
 
 `ttllm usage summary` and `costs` can scope to a single user by `--user <id>` or `--email <email>` (the email is resolved server-side; an unknown email returns 404). `ttllm usage by-user` lists usage and cost grouped per user, ordered by total cost descending; pass `--limit N` for the top N spenders.
 
+### Running Claude Code through the gateway
+
+```bash
+ttllm run claude                          # interactive Claude Code session via the gateway
+ttllm run claude -p "explain this repo"   # any claude arguments are passed through
+ttllm run claude --ttl-days 2 --small-model <gateway-model> --keep-env CLAUDE_CONFIG_DIR -- --help
+```
+
+`ttllm run claude` uses your login session to mint a temporary `llm.invoke` token (`POST /me/tokens`, label `ttllm run claude@<host>`, default lifetime 1 day). It then launches `claude` as a child process and revokes the token (`DELETE /me/tokens/{id}`) when Claude exits. If the revoke fails, it prints the token id so you can run `ttllm me tokens delete <id>`. If the CLI is killed outright, the TTL is the fallback.
+
+The child process gets a scrubbed environment:
+
+- Every `ANTHROPIC_*` and `CLAUDE*` variable, plus `AWS_BEARER_TOKEN_BEDROCK`, is removed so a stray API key or `CLAUDE_CODE_USE_BEDROCK` can't bypass the gateway. To keep a specific one, pass `--keep-env VAR` (repeatable).
+- `ANTHROPIC_BASE_URL` is set to `<gateway>/anthropic`.
+- `ANTHROPIC_AUTH_TOKEN` is set to the temporary token. It is sent as `Authorization: Bearer`; the gateway doesn't accept `x-api-key`, so `ANTHROPIC_API_KEY` isn't used.
+
+Claude Code's model names must match gateway model names (see [Model Name Matching](#model-name-matching)). Use claude's own `--model <name>` to pick the main model. `--small-model <name>` sets `ANTHROPIC_DEFAULT_HAIKU_MODEL` for Claude Code's background calls. The `ttllm run claude` options (`--ttl-days`, `--small-model`, `--keep-env`, `--claude-bin`) must come before the first positional claude argument. Put `--` before claude flags that would otherwise be read by ttllm, such as `--help`.
+
 ### Self-Service Endpoints
 
 Any authenticated user (including gateway-only users) can access the `/me` endpoints to discover their available models and manage their own tokens. The `/me/tokens` endpoints require a login-session JWT (password, SSO or device login): a gateway API token is rejected, so a leaked key can't mint new or broader credentials. Likewise, when `POST /admin/tokens` is called with an API token rather than a login session, the new token's permissions must be a subset of the caller's token:
@@ -546,6 +569,10 @@ Any authenticated user (including gateway-only users) can access the `/me` endpo
 | `GET /me/tokens` | Your active tokens |
 | `POST /me/tokens` | Create a token scoped to your permissions |
 | `DELETE /me/tokens/{id}` | Revoke one of your tokens |
+| `GET /me/quotas` | Your standing against the quotas that apply to you |
+| `GET /me/quota-overrides` | Your active quota overrides |
+| `POST /me/quota-overrides/lookup` | Preview a quota override code (login session) |
+| `POST /me/quota-overrides/redeem` | Redeem a quota override code (login session) |
 
 ### Status Checks
 
@@ -586,10 +613,12 @@ A browser-based UI is available at `/ui` for self-service tasks without needing 
 - **Login** with email/password or SSO (configured identity providers are detected automatically)
 - **View models** assigned to your account
 - **Manage tokens** — create new API tokens and revoke existing ones
+- **Usage** — your requests, tokens, and costs (costs rounded to cents)
+- **Quota** — your current quota buckets (used / in flight / limit, reset time), an override banner while one is active, and a form to apply a quota override code. Users with `quota.override` also get a form to issue codes
 
 ### Access
 
-Navigate to `http://localhost:8000/ui` (or your deployed base URL + `/ui`). The UI uses only `/me/` endpoints — no admin access is exposed.
+Navigate to `http://localhost:8000/ui` (or your deployed base URL + `/ui`). The UI uses only `/me/` endpoints, except the quota override issue form, which calls `POST /admin/quota-overrides` and is shown only to users holding `quota.override`.
 
 Authentication state is stored in `sessionStorage`, so it is scoped to the browser tab and cleared when the tab is closed.
 

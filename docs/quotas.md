@@ -5,7 +5,8 @@ on its own and attached to requests by [rules](rules-engine.md), so one budget c
 several rules, and limits can be changed without touching rules.
 
 This is an administrator-facing feature. Users see the effects (a `429` once a limit is reached)
-and can check where they stand with `ttllm me quotas`.
+and can check where they stand with `ttllm me quotas` or the **Quota** tab of the web UI (`/ui`).
+A temporary exemption is granted with a [quota override](#quota-overrides).
 
 ---
 
@@ -19,6 +20,7 @@ and can check where they stand with `ttllm me quotas`.
 - [What a blocked client sees](#what-a-blocked-client-sees)
 - [Worked examples](#worked-examples)
 - [Managing quotas](#managing-quotas)
+- [Quota overrides](#quota-overrides)
 - [Operational notes](#operational-notes)
 - [Upgrading from rolling-window quota rules](#upgrading-from-rolling-window-quota-rules)
 
@@ -200,7 +202,8 @@ the quota, so creating such a rule logs a warning.
 
 1. Terminal rules run: block, reroute, rewrite, or allow.
 2. The model is resolved and access is checked.
-3. Every matching `apply_quota` rule contributes its quotas.
+3. Every matching `apply_quota` rule contributes its quotas. If any do and the user has an active
+   [quota override](#quota-overrides), quota handling stops here: skip to step 5 with nothing reserved.
 4. **Reserve**, in one short transaction: lock the buckets, roll over expired windows, check every
    limit, and record the estimate. If any bucket refuses, nothing is reserved. If the refusing quota
    reroutes, go back to step 1 with the client's original request and the new model.
@@ -334,6 +337,52 @@ log.
 
 `/me/quotas` works out which quotas apply without seeing a real request, so rules matching on request
 content are best-effort there.
+
+## Quota overrides
+
+An override lifts **every** quota for one user for a limited time. It's granted with a single-use
+code: someone with the `quota.override` permission issues it, and the user who needs it enters it in
+the **Quota** tab of the web UI (`/ui`). The issuer can redeem their own code.
+
+A code carries two lifetimes:
+
+- **Code lifetime** (`code_ttl_seconds`, 1 minute to 7 days): how long the code can be redeemed.
+- **Override duration** (`override_duration_seconds`, 1 minute to 30 days): how long the override
+  lasts. Its clock starts when the code is redeemed, not when it's issued.
+
+Every code needs a **reason**, which is recorded in the audit log.
+
+While an override is active, quota is bypassed completely: no reservation is made, no bucket usage
+is recorded, and nothing is blocked or rerouted by a quota. Terminal rules (block, reroute,
+rewrite) and model access checks still apply. The audit log still records each request's tokens and
+cost, and its `metadata_json.quota_override` holds the override's id, expiry, and reason. Usage
+during an override never shows up in the buckets, so it doesn't count once the override ends.
+
+A code works once, even if several users submit it at the same moment. Only the code's SHA-256
+hash is stored, so a lost code can't be recovered. Issue a new one and revoke the old one.
+
+```bash
+ttllm quotas overrides issue --duration 4h --code-ttl 1d --reason "Release crunch for billing migration"
+ttllm quotas overrides list [--state pending|active|expired|code_expired|revoked]
+ttllm quotas overrides revoke <id> [--reason "..."]   # kills an unredeemed code or ends an active override
+```
+
+`issue` prints the code once. The web UI's Quota tab also has an issue form for users who hold
+`quota.override`. Listing and revoking are CLI only.
+
+| Method | Path | Permission |
+|---|---|---|
+| `POST` | `/admin/quota-overrides` | `quota.override` (login session) |
+| `GET` | `/admin/quota-overrides?state=&offset=&limit=` | `quota.override` (login session) |
+| `DELETE` | `/admin/quota-overrides/{id}?reason=` | `quota.override` (login session) |
+| `GET` | `/me/quota-overrides` | any authenticated user: your active overrides |
+| `POST` | `/me/quota-overrides/lookup` | login session: preview a code without redeeming it |
+| `POST` | `/me/quota-overrides/redeem` | login session |
+
+A code is effectively a credential, so issuing, managing, and redeeming require a login-session
+JWT (password, SSO, or device login). A gateway API token is refused. `quota.override` is granted to
+the `administrators` group by migration 023. Issuing, redeeming, and revoking are each recorded in
+the admin audit log (`quota_override.issue`, `.redeem`, `.revoke`) with the reason.
 
 ## Operational notes
 

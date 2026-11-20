@@ -10,8 +10,23 @@ from fastapi import APIRouter, Depends, HTTPException
 from ttllm.api.deps import AuthContext, DB, get_authenticated, get_session_authenticated
 from ttllm.schemas.admin import CostBreakdownItem, QuotaBucketResponse, UsageSummaryResponse, WhoamiResponse
 from ttllm.schemas.auth import TokenCreatedResponse, TokenResponse
-from ttllm.schemas.me import AvailableModelResponse, SelfTokenCreate
-from ttllm.services import auth_service, group_service, model_service, quota_service, usage_service
+from ttllm.schemas.me import (
+    AvailableModelResponse,
+    MyQuotaOverride,
+    QuotaOverrideCode,
+    QuotaOverridePreview,
+    SelfTokenCreate,
+)
+from ttllm.services import (
+    admin_audit_service,
+    auth_service,
+    group_service,
+    model_service,
+    quota_override_service,
+    quota_service,
+    usage_service,
+)
+from ttllm.services.quota_override_service import INVALID_CODE_MESSAGE, InvalidOverrideCodeError
 
 router = APIRouter(tags=["me"])
 
@@ -136,3 +151,60 @@ async def get_my_quotas(
     """
     views = await quota_service.statuses_for_user(db, ctx.user, ctx.jti)
     return [QuotaBucketResponse(**v) for v in views]
+
+
+@router.get("/me/quota-overrides", response_model=list[MyQuotaOverride])
+async def list_my_quota_overrides(
+    db: DB,
+    ctx: AuthContext = Depends(get_authenticated),
+):
+    """Your active quota overrides. While one is active, no quota applies to you."""
+    rows = await quota_override_service.list_active_for_user(db, ctx.user.id)
+    return [MyQuotaOverride.model_validate(r) for r in rows]
+
+
+@router.post("/me/quota-overrides/lookup", response_model=QuotaOverridePreview)
+async def lookup_quota_override(
+    body: QuotaOverrideCode,
+    db: DB,
+    ctx: AuthContext = Depends(get_session_authenticated),
+):
+    """Preview what an override code grants, without redeeming it."""
+    row = await quota_override_service.lookup(db, body.code)
+    if row is None:
+        raise HTTPException(404, detail={"type": "not_found", "message": INVALID_CODE_MESSAGE})
+    return QuotaOverridePreview(
+        reason=row.reason,
+        created_by_email=row.created_by_email,
+        override_duration_seconds=row.override_duration_seconds,
+        code_expires_at=row.code_expires_at,
+    )
+
+
+@router.post("/me/quota-overrides/redeem", response_model=MyQuotaOverride)
+async def redeem_quota_override(
+    body: QuotaOverrideCode,
+    db: DB,
+    ctx: AuthContext = Depends(get_session_authenticated),
+):
+    """Redeem a single-use override code. Quotas stop applying to you until it expires."""
+    try:
+        row = await quota_override_service.redeem(db, body.code, ctx.user)
+    except InvalidOverrideCodeError as e:
+        await db.rollback()
+        raise HTTPException(404, detail={"type": "not_found", "message": str(e)})
+    result = MyQuotaOverride.model_validate(row)
+    await admin_audit_service.log(
+        db,
+        actor=ctx.user,
+        actor_jti=ctx.jti,
+        action="quota_override.redeem",
+        resource_type="quota_override",
+        resource_id=row.id,
+        details={
+            "reason": row.reason,
+            "issued_by": row.created_by_email,
+            "override_expires_at": row.override_expires_at.isoformat(),
+        },
+    )
+    return result

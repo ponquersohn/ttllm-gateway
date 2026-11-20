@@ -14,7 +14,7 @@ import typer
 
 from ttllm.cli._common import TtllmTyper, console, get_client, handle_response, json_mode, print_json
 from ttllm.cli.client import TTLLMClient
-from ttllm.cli import audit, chat, groups, me, models, quotas, reports, rules, secrets, tokens, usage, users
+from ttllm.cli import audit, chat, groups, me, models, quotas, reports, rules, run, secrets, tokens, usage, users
 
 app = TtllmTyper(name="ttllm", help="TTLLM Gateway CLI")
 
@@ -29,6 +29,7 @@ app.add_typer(usage.app, name="usage")
 app.add_typer(audit.app, name="audit-logs")
 app.add_typer(reports.app, name="reports")
 app.add_typer(me.app, name="me")
+app.add_typer(run.app, name="run")
 app.command("chat")(chat.chat)
 
 

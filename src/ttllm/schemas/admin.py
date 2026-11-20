@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, PlainSerializer, field_validator, model_validator
 
 from ttllm.core.quota import format_amount
+from ttllm.core.quota_override import MAX_CODE_TTL_SECONDS, MAX_OVERRIDE_SECONDS, MIN_DURATION_SECONDS
 
 _SENSITIVE_KEY_PATTERN = re.compile(r"(secret|key|password|token|credential)", re.IGNORECASE)
 _REDACTED = "***REDACTED***"
@@ -414,6 +415,45 @@ class QuotaBucketResponse(BaseModel):
 
 class QuotaResetResponse(BaseModel):
     buckets_reset: int
+
+
+# --- Quota overrides ---
+
+
+class QuotaOverrideIssue(BaseModel):
+    override_duration_seconds: int = Field(ge=MIN_DURATION_SECONDS, le=MAX_OVERRIDE_SECONDS)
+    code_ttl_seconds: int = Field(ge=MIN_DURATION_SECONDS, le=MAX_CODE_TTL_SECONDS)
+    reason: str = Field(max_length=1024)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_required(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3:
+            raise ValueError("A reason (at least 3 characters) is required for the audit trail")
+        return value
+
+
+class QuotaOverrideIssued(BaseModel):
+    id: uuid.UUID
+    code: str
+    reason: str
+    override_duration_seconds: int
+    code_expires_at: datetime
+
+
+class QuotaOverrideResponse(BaseModel):
+    id: uuid.UUID
+    state: str
+    reason: str
+    created_by_email: str | None
+    override_duration_seconds: int
+    code_expires_at: datetime
+    redeemed_by_email: str | None
+    redeemed_at: datetime | None
+    override_expires_at: datetime | None
+    revoked_at: datetime | None
+    created_at: datetime
 
 
 # --- Secrets ---

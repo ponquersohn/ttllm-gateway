@@ -52,10 +52,17 @@ def me_quotas():
     """Show your standing against the quotas that apply to you."""
     with get_client() as client:
         data = handle_response(client.get("/me/quotas"))
+        overrides = [] if json_mode() else handle_response(client.get("/me/quota-overrides"))
 
     if json_mode():
         print_json(data)
         return
+
+    for o in overrides:
+        console.print(
+            f"[green]Quota override active until {o['override_expires_at']}[/green]: "
+            "no quota applies to you until then."
+        )
 
     if not data:
         console.print("[yellow]No quotas apply to you.[/yellow]")

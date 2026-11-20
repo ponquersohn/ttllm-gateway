@@ -14,11 +14,14 @@ from ttllm.cli._common import (
     get_client,
     handle_response,
     json_mode,
+    parse_duration_option,
     print_json,
     resolve_quota,
 )
 
 app = TtllmTyper(help="Manage quotas")
+overrides_app = TtllmTyper(help="Issue, list and revoke quota override codes")
+app.add_typer(overrides_app, name="overrides")
 
 
 def _describe_window(q: dict) -> str:
@@ -247,3 +250,94 @@ def quotas_reset(
         print_json(data)
         return
     console.print(f"[green]Quota reset:[/green] {data['buckets_reset']} bucket(s) cleared")
+
+
+# --- Overrides ---
+
+_OVERRIDE_STATES = ("pending", "active", "expired", "code_expired", "revoked")
+
+
+@overrides_app.command("issue")
+def overrides_issue(
+    duration: str = typer.Option(..., "--duration", help="How long the override lasts once redeemed (e.g. 30m, 4h, 2d)"),
+    code_ttl: str = typer.Option("1d", "--code-ttl", help="How long the code can be redeemed (e.g. 1h, 1d)"),
+    reason: str = typer.Option(..., "--reason", help="Why the override is granted (recorded in the audit log)"),
+):
+    """Issue a single-use code that bypasses all quotas for whoever redeems it."""
+    from ttllm.core.quota_override import format_duration
+
+    body = {
+        "override_duration_seconds": parse_duration_option(duration, "--duration"),
+        "code_ttl_seconds": parse_duration_option(code_ttl, "--code-ttl"),
+        "reason": reason,
+    }
+    with get_client() as client:
+        data = handle_response(client.post("/admin/quota-overrides", json=body))
+    if json_mode():
+        print_json(data)
+        return
+    console.print("[green]Override code issued.[/green] It is shown only once:\n")
+    console.print(f"  [bold]{data['code']}[/bold]\n", highlight=False, soft_wrap=True)
+    console.print(f"Grants:       {format_duration(data['override_duration_seconds'])} without quotas, from redemption")
+    console.print(f"Redeem until: {data['code_expires_at']}")
+    console.print("The recipient enters it in the Quota tab of the web UI (/ui).")
+
+
+@overrides_app.command("list")
+def overrides_list(
+    state: Optional[str] = typer.Option(None, "--state", help=f"Filter: {', '.join(_OVERRIDE_STATES)}"),
+    offset: int = typer.Option(0),
+    limit: int = typer.Option(50),
+):
+    """List override codes and overrides, newest first."""
+    from ttllm.core.quota_override import format_duration
+
+    if state is not None and state not in _OVERRIDE_STATES:
+        raise typer.BadParameter(f"must be one of {', '.join(_OVERRIDE_STATES)}", param_hint="--state")
+    params = {"offset": offset, "limit": limit}
+    if state:
+        params["state"] = state
+    with get_client() as client:
+        data = handle_response(client.get("/admin/quota-overrides", params=params))
+    if json_mode():
+        print_json(data)
+        return
+
+    table = Table(title=f"Quota overrides ({data['total']})")
+    table.add_column("ID", no_wrap=True)
+    table.add_column("State")
+    table.add_column("Duration")
+    table.add_column("Issued by")
+    table.add_column("Redeemed by")
+    table.add_column("Expires")
+    table.add_column("Reason")
+    for o in data["items"]:
+        expires = o["override_expires_at"] if o["redeemed_at"] else f"code: {o['code_expires_at']}"
+        table.add_row(
+            o["id"],
+            o["state"],
+            format_duration(o["override_duration_seconds"]),
+            o["created_by_email"] or "",
+            o["redeemed_by_email"] or "",
+            expires or "",
+            o["reason"],
+        )
+    console.print(table)
+
+
+@overrides_app.command("revoke")
+def overrides_revoke(
+    override_id: str = typer.Argument(help="Override ID"),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Why it's revoked (recorded in the audit log)"),
+):
+    """Revoke an unredeemed code, or end an active override immediately."""
+    params = {"reason": reason} if reason else {}
+    with get_client() as client:
+        resp = client.delete(f"/admin/quota-overrides/{override_id}", params=params)
+        if resp.status_code == 204:
+            if json_mode():
+                print_json({"status": "revoked", "id": override_id})
+            else:
+                console.print("[green]Override revoked.[/green]")
+        else:
+            handle_response(resp)
