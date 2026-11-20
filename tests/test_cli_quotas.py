@@ -157,3 +157,90 @@ class TestRulesApplyQuota:
         )
         assert result.exit_code == 0, result.output
         assert api.body()["action"] == {"type": "allow"}
+
+
+OVERRIDE_ID = "22222222-2222-2222-2222-222222222222"
+ISSUED = {
+    "id": OVERRIDE_ID,
+    "code": "ttqo_secretcode",
+    "reason": "release crunch",
+    "override_duration_seconds": 14400,
+    "code_expires_at": "2026-11-21T12:00:00Z",
+}
+LISTED = {
+    "id": OVERRIDE_ID,
+    "state": "active",
+    "reason": "release crunch",
+    "created_by_email": "admin@example.com",
+    "override_duration_seconds": 14400,
+    "code_expires_at": "2026-11-21T12:00:00Z",
+    "redeemed_by_email": "dev@example.com",
+    "redeemed_at": "2026-11-20T12:00:00Z",
+    "override_expires_at": "2026-11-20T16:00:00Z",
+    "revoked_at": None,
+    "created_at": "2026-11-20T11:00:00Z",
+}
+
+
+class _OverrideApi:
+    def __init__(self, monkeypatch):
+        self.requests: list[httpx.Request] = []
+        client = httpx.Client(base_url="http://test", transport=httpx.MockTransport(self._handle))
+        monkeypatch.setattr(quotas, "get_client", lambda: client)
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(201, json=ISSUED)
+        if request.method == "GET":
+            return httpx.Response(200, json={"items": [LISTED], "total": 1, "offset": 0, "limit": 50})
+        return httpx.Response(204)
+
+
+@pytest.fixture
+def override_api(monkeypatch):
+    return _OverrideApi(monkeypatch)
+
+
+class TestOverrides:
+    def test_issue_parses_durations_and_shows_code(self, override_api):
+        result = _invoke(
+            quotas.app, "overrides", "issue", "--duration", "4h", "--code-ttl", "2d", "--reason", "release crunch"
+        )
+        assert result.exit_code == 0, result.output
+        request = override_api.requests[-1]
+        assert request.url.path == "/admin/quota-overrides"
+        assert json.loads(request.content) == {
+            "override_duration_seconds": 14400,
+            "code_ttl_seconds": 172800,
+            "reason": "release crunch",
+        }
+        assert "ttqo_secretcode" in result.output
+
+    def test_issue_requires_reason(self, override_api):
+        result = _invoke(quotas.app, "overrides", "issue", "--duration", "4h")
+        assert result.exit_code != 0
+        assert not override_api.requests
+
+    def test_issue_rejects_bad_duration(self, override_api):
+        result = _invoke(quotas.app, "overrides", "issue", "--duration", "soon", "--reason", "x y z")
+        assert result.exit_code != 0
+        assert not override_api.requests
+
+    def test_list_with_state(self, override_api):
+        result = runner.invoke(quotas.app, ["overrides", "list", "--state", "active"], env={"COLUMNS": "250"})
+        assert result.exit_code == 0, result.output
+        assert override_api.requests[-1].url.params["state"] == "active"
+        assert "dev@example.com" in result.output
+
+    def test_list_rejects_unknown_state(self, override_api):
+        assert _invoke(quotas.app, "overrides", "list", "--state", "bogus").exit_code != 0
+        assert not override_api.requests
+
+    def test_revoke_with_reason(self, override_api):
+        result = _invoke(quotas.app, "overrides", "revoke", OVERRIDE_ID, "--reason", "done early")
+        assert result.exit_code == 0, result.output
+        request = override_api.requests[-1]
+        assert request.method == "DELETE"
+        assert request.url.path == f"/admin/quota-overrides/{OVERRIDE_ID}"
+        assert request.url.params["reason"] == "done early"

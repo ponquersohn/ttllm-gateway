@@ -151,6 +151,16 @@ tr:hover td{background:rgba(0,0,0,.015)}
 }
 
 .hidden{display:none!important}
+/* Quota */
+.quota-bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;min-width:80px}
+.quota-bar>span{display:block;height:100%;background:var(--accent)}
+.quota-bar.warn>span{background:#f59e0b}
+.quota-bar.full>span{background:var(--danger)}
+.quota-sub{font-size:12px;color:var(--text-secondary)}
+.override-banner{background:#ecfdf5;border:1px solid #10b981;color:#065f46;border-radius:var(--radius);padding:12px 16px;margin-bottom:20px;font-size:14px}
+.override-preview{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin:12px 0;font-size:14px;line-height:1.6}
+textarea.input,select.input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:14px;font-family:inherit;background:var(--surface);color:var(--text);outline:none}
+textarea.input{resize:vertical;min-height:60px}
 </style>
 </head>
 <body>
@@ -214,6 +224,7 @@ tr:hover td{background:rgba(0,0,0,.015)}
     <button class="tab active" data-tab="tokens">Tokens</button>
     <button class="tab" data-tab="models">Models</button>
     <button class="tab" data-tab="usage">Usage</button>
+    <button class="tab" data-tab="quota">Quota</button>
   </div>
 
   <!-- Tokens Tab -->
@@ -268,6 +279,76 @@ tr:hover td{background:rgba(0,0,0,.015)}
         <button class="btn btn-primary" id="chat-send-btn">Send</button>
       </div>
       <div class="chat-meta hidden" id="chat-meta"></div>
+    </div>
+  </div>
+
+  <!-- Quota Tab -->
+  <div id="tab-quota" class="hidden">
+    <div id="override-banner" class="override-banner hidden"></div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3>My Quotas</h3>
+        <button class="btn btn-secondary" id="quota-refresh-btn">Refresh</button>
+      </div>
+      <div id="quota-table-wrapper">
+        <div class="loading"><span class="spinner"></span> Loading quotas...</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3>Apply Override Code</h3>
+      </div>
+      <p class="quota-sub" style="margin-bottom:12px">An override code lifts every quota for your account for a limited time. Each code works once.</p>
+      <form id="override-redeem-form">
+        <div class="form-group">
+          <label for="override-code">Override code</label>
+          <input type="text" id="override-code" placeholder="ttqo_..." autocomplete="off" required>
+        </div>
+        <button type="submit" class="btn btn-secondary" id="override-check-btn">Check code</button>
+      </form>
+      <div id="override-preview" class="hidden">
+        <div class="override-preview" id="override-preview-details"></div>
+        <button type="button" class="btn btn-primary" id="override-apply-btn">Apply override</button>
+        <button type="button" class="btn btn-secondary" id="override-cancel-btn">Cancel</button>
+      </div>
+    </div>
+    <div class="panel hidden" id="override-issue-panel">
+      <div class="panel-header">
+        <h3>Issue Override Code</h3>
+      </div>
+      <form id="override-issue-form">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="override-duration">Override lasts (after it's applied)</label>
+            <select class="input" id="override-duration">
+              <option value="1800">30 minutes</option>
+              <option value="3600">1 hour</option>
+              <option value="14400" selected>4 hours</option>
+              <option value="28800">8 hours</option>
+              <option value="86400">1 day</option>
+              <option value="259200">3 days</option>
+              <option value="604800">7 days</option>
+              <option value="2592000">30 days</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="override-code-ttl">Code can be applied for</label>
+            <select class="input" id="override-code-ttl">
+              <option value="3600">1 hour</option>
+              <option value="14400">4 hours</option>
+              <option value="86400" selected>1 day</option>
+              <option value="259200">3 days</option>
+              <option value="604800">7 days</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="override-reason">Reason (required, recorded in the audit log)</label>
+          <textarea class="input" id="override-reason" maxlength="1024" placeholder="e.g. Release crunch for the billing migration"></textarea>
+        </div>
+        <button type="submit" class="btn btn-primary" id="override-issue-btn" disabled>Issue code</button>
+      </form>
+      <div id="override-issued" class="token-reveal hidden"></div>
     </div>
   </div>
 
@@ -816,7 +897,7 @@ tr:hover td{background:rgba(0,0,0,.015)}
       const s = await resp.json();
       usageSummaryEl.innerHTML =
         '<div class="stat-card"><div class="stat-value">' + s.total_requests.toLocaleString() + '</div><div class="stat-label">Requests</div></div>' +
-        '<div class="stat-card"><div class="stat-value">$' + escapeHtml(s.total_cost || "0") + '</div><div class="stat-label">Total Cost</div></div>' +
+        '<div class="stat-card"><div class="stat-value">' + escapeHtml(formatCost(s.total_cost)) + '</div><div class="stat-label">Total Cost</div></div>' +
         '<div class="stat-card"><div class="stat-value">' + s.total_input_tokens.toLocaleString() + '</div><div class="stat-label">Input Tokens</div></div>' +
         '<div class="stat-card"><div class="stat-value">' + s.total_output_tokens.toLocaleString() + '</div><div class="stat-label">Output Tokens</div></div>' +
         '<div class="stat-card"><div class="stat-value">' + s.avg_latency_ms.toLocaleString(undefined, {maximumFractionDigits: 1}) + ' ms</div><div class="stat-label">Avg Latency</div></div>';
@@ -837,7 +918,7 @@ tr:hover td{background:rgba(0,0,0,.015)}
             '<td>' + c.request_count.toLocaleString() + '</td>' +
             '<td>' + c.input_tokens.toLocaleString() + '</td>' +
             '<td>' + c.output_tokens.toLocaleString() + '</td>' +
-            '<td>$' + escapeHtml(c.total_cost) + '</td>' +
+            '<td>' + escapeHtml(formatCost(c.total_cost)) + '</td>' +
             '</tr>';
         });
         html += '</tbody></table>';
@@ -878,6 +959,198 @@ tr:hover td{background:rgba(0,0,0,.015)}
     });
   });
 
+
+  // --- Quota ---
+  const quotaWrapper = $("#quota-table-wrapper");
+  const overrideBanner = $("#override-banner");
+  const overridePreview = $("#override-preview");
+  const overrideIssuePanel = $("#override-issue-panel");
+  const overrideIssued = $("#override-issued");
+  const overrideReason = $("#override-reason");
+  const overrideIssueBtn = $("#override-issue-btn");
+
+  async function errorMessage(resp, fallback) {
+    const err = await resp.json().catch(() => null);
+    if (err && err.error && err.error.message) return err.error.message;
+    if (err && Array.isArray(err.detail) && err.detail.length) {
+      return err.detail.map(function(d) { return String(d.msg || "").replace(/^Value error, /, ""); }).join("; ");
+    }
+    return fallback;
+  }
+
+  function formatDuration(seconds) {
+    var parts = [];
+    [["d", 86400], ["h", 3600], ["m", 60]].forEach(function(u) {
+      if (seconds >= u[1]) { parts.push(Math.floor(seconds / u[1]) + u[0]); seconds = seconds % u[1]; }
+    });
+    return parts.join(" ") || (seconds + "s");
+  }
+
+  function formatRelative(iso) {
+    if (!iso) return "";
+    var secs = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
+    if (secs <= 0) return "now";
+    return "in " + formatDuration(Math.max(secs, 60));
+  }
+
+  function formatQuotaAmount(value, measure) {
+    var n = Number(value);
+    if (measure === "cost") return formatCost(value);
+    return n.toLocaleString();
+  }
+
+  function hasPermission(perm) {
+    return !!(currentUser && (currentUser.effective_permissions || []).indexOf(perm) !== -1);
+  }
+
+  async function loadOverrideBanner() {
+    const resp = await apiFetch("/me/quota-overrides");
+    if (!resp || !resp.ok) { overrideBanner.classList.add("hidden"); return; }
+    const overrides = await resp.json();
+    if (!overrides.length) { overrideBanner.classList.add("hidden"); return; }
+    const o = overrides[0];
+    overrideBanner.innerHTML =
+      '<strong>Quota override active</strong> until ' + escapeHtml(formatDate(o.override_expires_at)) +
+      ' (' + escapeHtml(formatRelative(o.override_expires_at)) + '). No quota applies to you until then.' +
+      '<div class="quota-sub" style="color:inherit;margin-top:4px">Reason: ' + escapeHtml(o.reason) +
+      (o.created_by_email ? ' &middot; issued by ' + escapeHtml(o.created_by_email) : '') + '</div>';
+    overrideBanner.classList.remove("hidden");
+  }
+
+  async function loadQuota() {
+    overrideIssuePanel.classList.toggle("hidden", !hasPermission("quota.override"));
+    loadOverrideBanner();
+    quotaWrapper.innerHTML = '<div class="loading"><span class="spinner"></span> Loading quotas...</div>';
+    const resp = await apiFetch("/me/quotas");
+    if (!resp) return;
+    if (!resp.ok) {
+      quotaWrapper.innerHTML = '<div class="no-data">Failed to load quotas</div>';
+      return;
+    }
+    const buckets = await resp.json();
+    if (buckets.length === 0) {
+      quotaWrapper.innerHTML = '<div class="no-data">No quotas apply to you.</div>';
+      return;
+    }
+    let html = '<table><thead><tr><th>Quota</th><th>Model</th><th>Usage</th><th>Remaining</th><th>Resets</th></tr></thead><tbody>';
+    buckets.forEach(function(b) {
+      var limit = Number(b.limit), used = Number(b.used), inFlight = Number(b.in_flight);
+      var pct = limit > 0 ? Math.min(100, ((used + inFlight) / limit) * 100) : 0;
+      var barClass = pct >= 100 ? "quota-bar full" : (pct >= 80 ? "quota-bar warn" : "quota-bar");
+      var model = (b.dimension_values && b.dimension_values.model_name) || "all models";
+      html += '<tr>' +
+        '<td>' + escapeHtml(b.quota_name) + '<div class="quota-sub">' + escapeHtml(b.measure) + '</div></td>' +
+        '<td>' + escapeHtml(model) + '</td>' +
+        '<td><div class="' + barClass + '"><span style="width:' + pct.toFixed(1) + '%"></span></div>' +
+          '<div class="quota-sub">' + escapeHtml(formatQuotaAmount(b.used, b.measure)) + ' / ' +
+          escapeHtml(formatQuotaAmount(b.limit, b.measure)) +
+          (inFlight > 0 ? ' (+' + escapeHtml(formatQuotaAmount(b.in_flight, b.measure)) + ' in flight)' : '') +
+          '</div></td>' +
+        '<td>' + escapeHtml(formatQuotaAmount(b.remaining, b.measure)) + '</td>' +
+        '<td>' + (b.window_end ? escapeHtml(formatRelative(b.window_end)) +
+          '<div class="quota-sub">' + escapeHtml(formatDate(b.window_end)) + '</div>' : '<span class="quota-sub">not started</span>') + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    quotaWrapper.innerHTML = html;
+  }
+
+  $("#quota-refresh-btn").addEventListener("click", loadQuota);
+
+  $("#override-redeem-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("#override-check-btn");
+    const code = $("#override-code").value.trim();
+    if (!code) return;
+    btn.disabled = true;
+    try {
+      const resp = await apiFetch("/me/quota-overrides/lookup", { method: "POST", body: { code: code } });
+      if (!resp) return;
+      if (!resp.ok) throw new Error(await errorMessage(resp, "Invalid override code"));
+      const p = await resp.json();
+      $("#override-preview-details").innerHTML =
+        'This code lifts all your quotas for <strong>' + escapeHtml(formatDuration(p.override_duration_seconds)) +
+        '</strong>, starting when you apply it.<br>' +
+        'Code valid until: ' + escapeHtml(formatDate(p.code_expires_at)) + '<br>' +
+        'Issued by: ' + escapeHtml(p.created_by_email || "(unknown)") + '<br>' +
+        'Reason: ' + escapeHtml(p.reason);
+      overridePreview.classList.remove("hidden");
+    } catch (err) {
+      overridePreview.classList.add("hidden");
+      toast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("#override-cancel-btn").addEventListener("click", function() {
+    overridePreview.classList.add("hidden");
+  });
+
+  $("#override-apply-btn").addEventListener("click", async function() {
+    const code = $("#override-code").value.trim();
+    this.disabled = true;
+    try {
+      const resp = await apiFetch("/me/quota-overrides/redeem", { method: "POST", body: { code: code } });
+      if (!resp) return;
+      if (!resp.ok) throw new Error(await errorMessage(resp, "Failed to apply override"));
+      const o = await resp.json();
+      toast("Quota override active until " + formatDate(o.override_expires_at), "success");
+      $("#override-code").value = "";
+      overridePreview.classList.add("hidden");
+      loadQuota();
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      this.disabled = false;
+    }
+  });
+
+  overrideReason.addEventListener("input", function() {
+    overrideIssueBtn.disabled = this.value.trim().length < 3;
+  });
+
+  $("#override-issue-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const reason = overrideReason.value.trim();
+    if (reason.length < 3) { toast("A reason is required", "error"); return; }
+    overrideIssueBtn.disabled = true;
+    overrideIssued.classList.add("hidden");
+    try {
+      const resp = await apiFetch("/admin/quota-overrides", {
+        method: "POST",
+        body: {
+          override_duration_seconds: parseInt($("#override-duration").value, 10),
+          code_ttl_seconds: parseInt($("#override-code-ttl").value, 10),
+          reason: reason,
+        },
+      });
+      if (!resp) return;
+      if (!resp.ok) throw new Error(await errorMessage(resp, "Failed to issue override code"));
+      const data = await resp.json();
+      overrideIssued.innerHTML =
+        '<strong>Override code issued</strong>' +
+        '<code>' + escapeHtml(data.code) + '</code>' +
+        '<button class="btn-copy" id="copy-override-btn">Copy to clipboard</button>' +
+        '<div style="margin-top:8px">Lifts quotas for ' + escapeHtml(formatDuration(data.override_duration_seconds)) +
+        ' once applied. It can be applied until ' + escapeHtml(formatDate(data.code_expires_at)) + ', once.</div>' +
+        '<div class="warning">Save this code now. It will not be shown again.</div>';
+      overrideIssued.classList.remove("hidden");
+      $("#copy-override-btn").addEventListener("click", function() {
+        navigator.clipboard.writeText(data.code).then(function() {
+          toast("Copied to clipboard", "success");
+        }).catch(function() {
+          toast("Copy failed — select and copy manually", "error");
+        });
+      });
+      overrideReason.value = "";
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      overrideIssueBtn.disabled = overrideReason.value.trim().length < 3;
+    }
+  });
+
   // --- Tabs ---
   document.querySelectorAll(".tab").forEach(function(tab) {
     tab.addEventListener("click", function() {
@@ -887,9 +1160,13 @@ tr:hover td{background:rgba(0,0,0,.015)}
       $("#tab-tokens").classList.toggle("hidden", target !== "tokens");
       $("#tab-models").classList.toggle("hidden", target !== "models");
       $("#tab-usage").classList.toggle("hidden", target !== "usage");
+      $("#tab-quota").classList.toggle("hidden", target !== "quota");
       if (target === "usage" && !usageLoaded) {
         usageLoaded = true;
         loadUsage();
+      }
+      if (target === "quota") {
+        loadQuota();
       }
     });
   });
@@ -1060,6 +1337,14 @@ tr:hover td{background:rgba(0,0,0,.015)}
   }
 
   // --- Helpers ---
+  // Costs arrive as exact decimal strings (up to 18 places): show whole cents.
+  function formatCost(value) {
+    var n = Number(value || 0);
+    if (!isFinite(n)) return "$0.00";
+    if (n > 0 && n < 0.005) return "<$0.01";
+    return "$" + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
   function escapeHtml(str) {
     var div = document.createElement("div");
     div.appendChild(document.createTextNode(str));

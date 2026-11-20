@@ -10,9 +10,10 @@ from pydantic import ValidationError
 from sqlalchemy import text
 
 from ttllm import __version__
-from ttllm.api.deps import AuthContext, DB, get_authenticated, is_api_token, require_permission
+from ttllm.api.deps import AuthContext, DB, get_authenticated, get_session_authenticated, is_api_token, require_permission
 from ttllm.config import settings
 from ttllm.core.permissions import Permissions
+from ttllm.core.quota_override import OverrideState
 from ttllm.core.secrets import validate_fernet_key
 from ttllm.schemas.admin import (
     AssignRequest,
@@ -25,6 +26,9 @@ from ttllm.schemas.admin import (
     ModelUpdate,
     QuotaBucketResponse,
     QuotaDefinition,
+    QuotaOverrideIssue,
+    QuotaOverrideIssued,
+    QuotaOverrideResponse,
     QuotaResetResponse,
     QuotaResponse,
     QuotaUpdate,
@@ -55,7 +59,7 @@ from ttllm.schemas.auth import (
     UserPermissionAssign,
 )
 from ttllm.schemas.common import PaginatedResponse
-from ttllm.services import admin_audit_service, audit_service, auth_service, group_service, model_service, quota_service, rules_service, secret_service, usage_service, user_service
+from ttllm.services import admin_audit_service, audit_service, auth_service, group_service, model_service, quota_override_service, quota_service, rules_service, secret_service, usage_service, user_service
 from ttllm.api.me import _build_whoami
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -1216,3 +1220,84 @@ async def reset_quota(
         details={"buckets_reset": count},
     )
     return QuotaResetResponse(buckets_reset=count)
+
+
+# --- Quota overrides ---
+
+# A code is effectively a credential, so only interactive login sessions may mint or manage them.
+_require_override = require_permission(Permissions.QUOTA_OVERRIDE, auth_dep=get_session_authenticated)
+
+
+@router.post("/quota-overrides", response_model=QuotaOverrideIssued, status_code=201)
+async def issue_quota_override(
+    body: QuotaOverrideIssue,
+    db: DB,
+    ctx: AuthContext = Depends(_require_override),
+):
+    """Issue a single-use code that bypasses all quotas for whoever redeems it. Shown once."""
+    row, code = await quota_override_service.issue(
+        db, ctx.user, body.override_duration_seconds, body.code_ttl_seconds, body.reason
+    )
+    result = QuotaOverrideIssued(
+        id=row.id,
+        code=code,
+        reason=row.reason,
+        override_duration_seconds=row.override_duration_seconds,
+        code_expires_at=row.code_expires_at,
+    )
+    await admin_audit_service.log(
+        db,
+        actor=ctx.user,
+        actor_jti=ctx.jti,
+        action="quota_override.issue",
+        resource_type="quota_override",
+        resource_id=row.id,
+        details={
+            "reason": row.reason,
+            "override_duration_seconds": row.override_duration_seconds,
+            "code_expires_at": row.code_expires_at.isoformat(),
+        },
+    )
+    return result
+
+
+@router.get("/quota-overrides", response_model=PaginatedResponse[QuotaOverrideResponse])
+async def list_quota_overrides(
+    db: DB,
+    ctx: AuthContext = Depends(_require_override),
+    state: OverrideState | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    items, total = await quota_override_service.list_overrides(db, state=state, offset=offset, limit=limit)
+    return PaginatedResponse(
+        items=[QuotaOverrideResponse(**i) for i in items], total=total, offset=offset, limit=limit
+    )
+
+
+@router.delete("/quota-overrides/{override_id}", status_code=204)
+async def revoke_quota_override(
+    override_id: uuid.UUID,
+    db: DB,
+    ctx: AuthContext = Depends(_require_override),
+    reason: str | None = Query(None, max_length=1024),
+):
+    """Revoke an unredeemed code, or end an active override immediately."""
+    row = await quota_override_service.revoke(db, override_id, ctx.user)
+    if row is None:
+        await db.rollback()
+        raise HTTPException(
+            404, detail={"type": "not_found", "message": "Override not found or already revoked"}
+        )
+    details = {"issue_reason": row.reason}
+    if reason:
+        details["reason"] = reason
+    await admin_audit_service.log(
+        db,
+        actor=ctx.user,
+        actor_jti=ctx.jti,
+        action="quota_override.revoke",
+        resource_type="quota_override",
+        resource_id=override_id,
+        details=details,
+    )

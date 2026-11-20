@@ -86,6 +86,7 @@ class Permissions:
     QUOTA_CREATE = _define("quota.create", "Create quotas", "management")
     QUOTA_MODIFY = _define("quota.modify", "Update and reset quotas", "management")
     QUOTA_DELETE = _define("quota.delete", "Delete quotas", "management")
+    QUOTA_OVERRIDE = _define("quota.override", "Issue, list and revoke quota override codes", "management")
 
     # --- Token ---
     TOKEN_CREATE = _define("token.create", "Generate gateway tokens", "management")

@@ -81,3 +81,40 @@ class QuotaReservation(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class QuotaOverride(Base):
+    """A single-use code that, once redeemed, bypasses all quotas for its redeemer for a time.
+
+    One row covers both lifetimes: before redemption it's a code (valid until
+    ``code_expires_at``); after, it's an active override (until ``override_expires_at``).
+    Only the code's SHA-256 hash is stored.
+    """
+
+    __tablename__ = "quota_overrides"
+    __table_args__ = (
+        Index("ix_quota_overrides_redeemed_by_override_expires_at", "redeemed_by", "override_expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # Captured at issue time so the record stays readable after the issuer is deleted.
+    created_by_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reason: Mapped[str] = mapped_column(String(1024))
+    override_duration_seconds: Mapped[int] = mapped_column(Integer)
+    code_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    redeemed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    redeemed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    override_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

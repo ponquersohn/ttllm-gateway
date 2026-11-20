@@ -171,3 +171,13 @@ def resolve_quota(client: httpx.Client, name: str) -> str:
             return q["id"]
     console.print(f"[red]Quota not found: {name}[/red]")
     raise typer.Exit(1)
+
+
+def parse_duration_option(value: str, option: str) -> int:
+    """Parse a human duration (``30m``, ``4h``, ``2d``) into seconds, or fail as a bad parameter."""
+    from ttllm.core.quota_override import parse_duration
+
+    try:
+        return parse_duration(value)
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint=option)

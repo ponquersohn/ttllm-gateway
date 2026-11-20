@@ -13,5 +13,5 @@ from ttllm.models.secret import Secret  # noqa: E402, F401
 from ttllm.models.oidc_state import OidcState  # noqa: E402, F401
 from ttllm.models.admin_audit import AdminAuditLog  # noqa: E402, F401
 from ttllm.models.rule import Rule  # noqa: E402, F401
-from ttllm.models.quota import Quota, QuotaBucket, QuotaReservation  # noqa: E402, F401
+from ttllm.models.quota import Quota, QuotaBucket, QuotaOverride, QuotaReservation  # noqa: E402, F401
 from ttllm.models.device_auth import DeviceAuthorization  # noqa: E402, F401

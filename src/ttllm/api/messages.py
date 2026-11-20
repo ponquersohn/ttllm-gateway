@@ -35,7 +35,7 @@ from ttllm.core.quota import (
 from ttllm.core.rules import ActionType, collect_quota_ids, references_resolved_model
 from ttllm.db import async_session_factory
 from ttllm.schemas.anthropic import MessagesRequest, MessagesResponse
-from ttllm.services import audit_service, model_service, quota_service, rules_service, secret_service, user_service
+from ttllm.services import audit_service, model_service, quota_override_service, quota_service, rules_service, secret_service, user_service
 from ttllm.services.quota_service import NO_LEASE, QuotaContentionError, QuotaExceededError, QuotaLease
 
 logger = logging.getLogger(__name__)
@@ -276,8 +276,19 @@ async def _route_request(
         quota_ids = (
             collect_quota_ids(active_rules, build_context(current, target.llm_model.name)) if active_rules else []
         )
-        await db.commit()
         if not quota_ids:
+            await db.commit()
+            return current, target, NO_LEASE
+
+        # A redeemed override bypasses quota entirely: nothing reserved, charged, or enforced.
+        override = await quota_override_service.active_override_for_user(db, ctx.user.id)
+        await db.commit()
+        if override is not None:
+            metadata["quota_override"] = {
+                "id": str(override.id),
+                "expires_at": override.override_expires_at.isoformat(),
+                "reason": override.reason,
+            }
             return current, target, NO_LEASE
 
         subject = QuotaSubject(
